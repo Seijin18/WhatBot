@@ -84,7 +84,13 @@ def executar_handover_para_secretaria(
         "Em breve um atendente humano continuará a conversa por aqui."
     )
     if not simulated:
-        whatsapp.send_text(phone, handover_text)
+        whatsapp.send_text(
+            phone,
+            handover_text,
+            source="handover",
+            contact_id=contact_id,
+            simulated=simulated,
+        )
     db.save_message(contact_id, direction="out", text=handover_text)
     db.enroll_handover(
         contact_id, motivo=motivo, push_name=push_name, prioridade=prioridade

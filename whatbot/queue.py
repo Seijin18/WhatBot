@@ -92,7 +92,7 @@ def notify_admin(
         if admin_phone in excluded:
             continue
         try:
-            whatsapp.send_text(admin_phone, message)
+            whatsapp.send_text(admin_phone, message, source="admin_notify")
             logger.info("Notificação enviada ao admin %s", admin_phone)
             sent = True
         except Exception:

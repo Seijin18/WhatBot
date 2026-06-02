@@ -11,7 +11,8 @@ class TestPromptBuilder(unittest.TestCase):
     def test_enriched_contains_modalidades(self):
         prompt = build_enriched_system_prompt("Você é um assistente.")
         self.assertIn("Judô", prompt)
-        self.assertIn("Base de conhecimento", prompt)
+        self.assertIn("Kannon", prompt)
+        self.assertIn("BASE DE CONHECIMENTO", prompt)
 
 
 class TestOllamaClient(unittest.TestCase):

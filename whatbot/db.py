@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Optional, List
+from typing import Any, Optional, List
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ class Contact:
     handover_at: datetime | None = None
     atendido_at: datetime | None = None
     handover_motivo: str | None = None
+    session_state: dict[str, Any] | None = None
 
 
 @dataclass
@@ -94,6 +96,7 @@ class Database:
         ALTER TABLE contatos ADD COLUMN IF NOT EXISTS prioridade INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE contatos ADD COLUMN IF NOT EXISTS assumido_por VARCHAR(32);
         ALTER TABLE contatos ADD COLUMN IF NOT EXISTS bot_resume_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE contatos ADD COLUMN IF NOT EXISTS session_state JSONB NOT NULL DEFAULT '{}'::jsonb;
         CREATE TABLE IF NOT EXISTS admin_sessao (
             admin_phone VARCHAR(32) PRIMARY KEY,
             acao VARCHAR(32) NOT NULL,
@@ -128,6 +131,17 @@ class Database:
             raise
 
     def _row_to_contact(self, row) -> Contact:
+        session_raw = row[9] if len(row) > 9 else None
+        session_state: dict[str, Any] | None
+        if isinstance(session_raw, dict):
+            session_state = session_raw
+        elif session_raw:
+            try:
+                session_state = json.loads(session_raw)
+            except (TypeError, json.JSONDecodeError):
+                session_state = {}
+        else:
+            session_state = {}
         return Contact(
             id=row[0],
             phone=row[1],
@@ -138,11 +152,12 @@ class Database:
             handover_at=row[6] if len(row) > 6 else None,
             atendido_at=row[7] if len(row) > 7 else None,
             handover_motivo=row[8] if len(row) > 8 else None,
+            session_state=session_state,
         )
 
     _CONTACT_SELECT = """
         SELECT id, phone, status, ia_ativa, created_at,
-               push_name, handover_at, atendido_at, handover_motivo
+               push_name, handover_at, atendido_at, handover_motivo, session_state
         FROM contatos
     """
 
@@ -202,6 +217,21 @@ class Database:
                     "UPDATE contatos SET push_name = %s WHERE id = %s",
                     (push_name, contact_id),
                 )
+
+    def update_contact_session_state(
+        self, contact_id: int, session_state: dict[str, Any]
+    ) -> None:
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE contatos SET session_state = %s::jsonb WHERE id = %s",
+                        (json.dumps(session_state), contact_id),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro atualizando session_state: %s", e)
+            raise
 
     def update_contact_ia_active(self, contact_id: int, ia_ativa: bool) -> None:
         self.init_pool()

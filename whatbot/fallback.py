@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import unicodedata
-
+from .knowledge_facts import get_knowledge_facts, norm_text
 from .tools import (
     buscar_faq,
     buscar_horarios_turmas,
@@ -11,12 +10,6 @@ from .tools import (
     buscar_precos,
     listar_modalidades,
 )
-
-
-def _norm(text: str) -> str:
-    folded = unicodedata.normalize("NFKD", text)
-    ascii_text = folded.encode("ascii", "ignore").decode("ascii")
-    return ascii_text.lower()
 
 
 def trim_history_for_chat(history, current_text: str):
@@ -31,23 +24,25 @@ def trim_history_for_chat(history, current_text: str):
 
 def build_knowledge_fallback(user_message: str, reason: str = "error") -> str | None:
     """Build a helpful reply using only local knowledge tools (no LLM)."""
-    norm = _norm(user_message)
+    facts = get_knowledge_facts()
+    norm = norm_text(user_message)
     parts: list[str] = []
+    modalities = facts.match_modalidades(user_message)
+    price_signals = facts.intent_signals.get("precos", set())
+    horario_signals = facts.intent_signals.get("horarios", set())
+    faq_signals = facts.intent_signals.get("faq", set())
 
-    if any(token in norm for token in ("judo", "jui", "jiu")):
-        parts.append(buscar_horarios_turmas("judo infantil"))
-        parts.append(buscar_horarios_turmas("judo adulto"))
-        if any(token in norm for token in ("preco", "preço", "valor", "mensalidade", "plano")):
-            parts.append(buscar_precos("judo infantil"))
-    elif "yoga" in norm:
-        parts.append(buscar_horarios_turmas("yoga"))
-        if any(token in norm for token in ("preco", "preço", "valor", "mensalidade", "plano")):
-            parts.append(buscar_precos("yoga"))
-    elif any(token in norm for token in ("preco", "preço", "valor", "mensalidade")):
+    if modalities:
+        for mod in modalities:
+            parts.append(buscar_horarios_turmas(mod))
+        if any(token in norm for token in price_signals):
+            for mod in modalities[:2]:
+                parts.append(buscar_precos(mod))
+    elif any(token in norm for token in price_signals):
         parts.append(buscar_precos(""))
-    elif any(token in norm for token in ("endereco", "endereço", "onde", "local")):
+    elif any(token in norm for token in faq_signals if token in {"endereco", "endereço", "onde", "local"}):
         parts.append(buscar_info_associacao("endereço"))
-    elif any(token in norm for token in ("modalidade", "atividade", "aula", "horario", "horário")):
+    elif any(token in norm for token in horario_signals):
         parts.append(listar_modalidades())
     else:
         faq = buscar_faq(user_message)

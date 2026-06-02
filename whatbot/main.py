@@ -29,6 +29,11 @@ from .domain import (
     executar_handover_para_secretaria,
 )
 from .fallback import build_knowledge_fallback, trim_history_for_chat
+from .grounding import ensure_grounded_reply
+from .intent_router import high_risk_intents, route_intent
+from .prompt_builder import build_enriched_system_prompt
+from .reply_composer import get_reply_composer
+from .session_state import SessionState, history_summary, update_session_state
 from .webhook import parse_evolution_payload, parse_outgoing_staff_message
 from .admin import handle_admin_message
 from .admin_nlu import (
@@ -43,6 +48,7 @@ from .queue import (
     normalize_phone,
     run_periodic_queue_checks,
 )
+from .message_log import log_inbound, log_llm_turn, log_outbound
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("whatbot")
@@ -150,6 +156,7 @@ def run_admin_simulation(
         _whatsapp.send_text(
             admin_phone,
             f"🧪 *Teste como cliente* ({sim_phone}):\n{reply}",
+            source="simulation",
         )
     except Exception:
         logger.exception("Falha ao enviar simulação ao admin")
@@ -222,6 +229,17 @@ def process_customer_message(
     except Exception:
         logger.exception("Falha ao salvar mensagem de entrada; prosseguindo")
 
+    log_inbound(
+        phone,
+        text,
+        push_name=push_name,
+        contact_id=contact.id,
+        source="customer",
+        simulated=simulated,
+        contact_status=contact.status,
+        ia_ativa=contact.ia_ativa,
+    )
+
     if detectar_pedido_atendimento_humano(text):
         try:
             result = executar_handover_para_secretaria(
@@ -244,42 +262,111 @@ def process_customer_message(
 
     try:
         history = trim_history_for_chat(
-            _db.get_recent_messages(contact.id, limit=10), text
+            _db.get_recent_messages(contact.id, limit=6), text
         )
     except Exception:
         logger.exception("Falha ao carregar histórico; prosseguindo sem histórico")
         history = []
 
-    system_prompt = build_system_prompt_for_status(contact.status)
+    session = SessionState.from_dict(contact.session_state or {})
+    intent_result = route_intent(text, session, history)
+    session = update_session_state(session, text, intent_result.intent, history)
+    hist_summary = history_summary(history)
+
+    system_prompt = build_enriched_system_prompt(
+        build_system_prompt_for_status(contact.status),
+        intent=intent_result,
+        session=session,
+        history_summary=hist_summary,
+    )
     model_reply: str | None = None
     used_fallback = False
+    response_mode = "llm"
+    grounding_meta: Dict[str, Any] = {}
 
-    try:
-        model_reply = _llm.chat(
-            system_prompt=system_prompt, recent_history=history, user_message=text
-        )
-    except LlmUnavailableError as e:
-        logger.warning("LLM indisponível: %s", e)
-        reason = "quota" if "quota" in str(e).lower() or "resource_exhausted" in str(e).lower() else "error"
-        model_reply = build_knowledge_fallback(text, reason=reason)
-        used_fallback = bool(model_reply)
-        if not model_reply:
-            if not simulated:
-                _whatsapp.send_text(phone, MODEL_UNAVAILABLE_MSG)
-                _db.save_message(contact.id, direction="out", text=MODEL_UNAVAILABLE_MSG)
-            return {"ok": False, "error": "gemini_quota", "detail": str(e)}
-    except Exception as e:
-        logger.exception("Erro no modelo após retries Gemini: %s", e)
-        model_reply = build_knowledge_fallback(text)
-        used_fallback = bool(model_reply)
-        if not model_reply:
-            if not simulated:
-                _whatsapp.send_text(phone, MODEL_UNAVAILABLE_MSG)
-                _db.save_message(contact.id, direction="out", text=MODEL_UNAVAILABLE_MSG)
-            return {"ok": False, "error": "model_error", "detail": str(e)}
+    if intent_result.intent in high_risk_intents():
+        composed = get_reply_composer().compose(intent_result, text, session)
+        if composed:
+            model_reply = composed
+            response_mode = "template"
+            logger.info(
+                "Resposta template para intent=%s (alto risco factual)",
+                intent_result.intent,
+            )
+
+    if model_reply is None:
+        try:
+            model_reply = _llm.chat(
+                system_prompt=system_prompt,
+                recent_history=history,
+                user_message=text,
+            )
+        except LlmUnavailableError as e:
+            logger.warning("LLM indisponível: %s", e)
+            reason = "quota" if "quota" in str(e).lower() or "resource_exhausted" in str(e).lower() else "error"
+            model_reply = build_knowledge_fallback(text, reason=reason)
+            used_fallback = bool(model_reply)
+            response_mode = "fallback"
+            if not model_reply:
+                if not simulated:
+                    _whatsapp.send_text(
+                        phone,
+                        MODEL_UNAVAILABLE_MSG,
+                        source="system",
+                        contact_id=contact.id,
+                    )
+                    _db.save_message(contact.id, direction="out", text=MODEL_UNAVAILABLE_MSG)
+                return {"ok": False, "error": "gemini_quota", "detail": str(e)}
+        except Exception as e:
+            logger.exception("Erro no modelo após retries Gemini: %s", e)
+            model_reply = build_knowledge_fallback(text)
+            used_fallback = bool(model_reply)
+            response_mode = "fallback"
+            if not model_reply:
+                if not simulated:
+                    _whatsapp.send_text(
+                        phone,
+                        MODEL_UNAVAILABLE_MSG,
+                        source="system",
+                        contact_id=contact.id,
+                    )
+                    _db.save_message(contact.id, direction="out", text=MODEL_UNAVAILABLE_MSG)
+                return {"ok": False, "error": "model_error", "detail": str(e)}
 
     if used_fallback:
         logger.warning("Resposta via fallback offline (Gemini indisponível)")
+
+    grounding_corrected = False
+    original_llm_reply = model_reply
+    if model_reply and not used_fallback and response_mode == "llm":
+        model_reply, grounding_corrected, grounding_meta = ensure_grounded_reply(
+            model_reply, text, session
+        )
+        if grounding_corrected:
+            response_mode = grounding_meta.get("response_mode", "grounding_fix")
+
+    try:
+        _db.update_contact_session_state(contact.id, session.to_dict())
+    except Exception:
+        logger.exception("Falha ao persistir session_state")
+
+    llm_model = os.getenv("OLLAMA_MODEL") if os.getenv("LLM_PROVIDER", "gemini") == "ollama" else os.getenv("GEMINI_MODEL")
+    log_llm_turn(
+        phone,
+        text,
+        model_reply or "",
+        contact_id=contact.id,
+        contact_status=contact.status,
+        used_fallback=used_fallback,
+        llm_model=llm_model,
+        simulated=simulated,
+        grounding_corrected=grounding_corrected,
+        original_llm_reply=original_llm_reply if grounding_corrected else None,
+        intent=intent_result.intent,
+        response_mode=response_mode,
+        validation_passed=grounding_meta.get("validation_passed", True),
+        violations=grounding_meta.get("violations"),
+    )
 
     try:
         needs_human = detectar_intencao_human_handoff(model_reply)
@@ -310,8 +397,21 @@ def process_customer_message(
 
     try:
         if not simulated:
-            _whatsapp.send_text(phone, model_reply)
+            _whatsapp.send_text(
+                phone,
+                model_reply,
+                source="bot",
+                contact_id=contact.id,
+            )
         else:
+            log_outbound(
+                phone,
+                model_reply,
+                source="bot",
+                contact_id=contact.id,
+                simulated=True,
+                delivery="skipped",
+            )
             logger.info("Simulação: resposta não enviada ao cliente fictício %s", phone)
         _db.save_message(contact.id, direction="out", text=model_reply)
         return {
@@ -320,6 +420,8 @@ def process_customer_message(
             "model_reply": model_reply,
             "queue_check": queue_check,
             "simulated": simulated,
+            "intent": intent_result.intent,
+            "response_mode": response_mode,
         }
     except Exception as e:
         logger.exception("Erro ao enviar mensagem via Evolution API: %s", e)
@@ -342,6 +444,12 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         if outgoing:
             to_phone = normalize_phone(outgoing["to_number"])
             text = (outgoing.get("text") or "").strip()
+            log_outbound(
+                to_phone,
+                text,
+                source="staff",
+                delivery="whatsapp_business",
+            )
             if is_admin_phone(to_phone) and text:
                 sim = _resolve_admin_simulate(text)
                 if sim:
@@ -380,6 +488,12 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": "invalid_payload"}
 
     if is_admin_phone(phone):
+        log_inbound(
+            normalize_phone(phone),
+            text,
+            push_name=push_name,
+            source="admin",
+        )
         sim = _resolve_admin_simulate(text)
         if sim:
             sim_phone, sim_text = sim

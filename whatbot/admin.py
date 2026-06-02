@@ -49,7 +49,7 @@ Se houver *duas Marias*, o bot pergunta qual delas (responda *1*, *2* ou o telef
 
 
 def _reply(whatsapp, db, admin_phone: str, contact_id: int, text: str) -> dict:
-    whatsapp.send_text(admin_phone, text)
+    whatsapp.send_text(admin_phone, text, source="admin")
     db.save_message(contact_id, direction="out", text=text)
     return {"ok": True, "admin_command": True, "reply": text}
 

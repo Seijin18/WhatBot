@@ -114,17 +114,30 @@ def _parse_markdown(text: str) -> KnowledgeBase:
     )
 
 
-def default_knowledge_path() -> Path:
-    env_path = os.getenv("ASSOCIACAO_KNOWLEDGE_PATH", "").strip()
-    if env_path:
-        return Path(env_path)
-    for candidate in (
-        Path("/whatbot/knowledge/associacao.md"),
-        Path("knowledge/associacao.md"),
-    ):
-        if candidate.exists():
-            return candidate
+def _project_root() -> Path:
+    """Project root inside Docker (/whatbot) or repo root on the host."""
+    docker_root = Path("/whatbot")
+    if docker_root.is_dir():
+        return docker_root
+    return Path(__file__).resolve().parent.parent
+
+
+def resolve_knowledge_path(path: str | None = None) -> Path:
+    """Resolve ASSOCIACAO_KNOWLEDGE_PATH relative to the project root."""
+    raw = (path or os.getenv("ASSOCIACAO_KNOWLEDGE_PATH", "")).strip()
+    if raw:
+        resolved = Path(raw)
+        if not resolved.is_absolute():
+            resolved = _project_root() / resolved
+        return resolved
+    default = _project_root() / "knowledge" / "associacao.md"
+    if default.exists():
+        return default
     return Path("knowledge/associacao.md")
+
+
+def default_knowledge_path() -> Path:
+    return resolve_knowledge_path()
 
 
 class KnowledgeStore:
@@ -143,8 +156,14 @@ class KnowledgeStore:
                 f"Arquivo de conhecimento não encontrado: {self._path}"
             )
         text = self._path.read_text(encoding="utf-8")
+        return self.reload_from_text(text)
+
+    def reload_from_text(self, text: str) -> KnowledgeBase:
+        from .knowledge_facts import reset_knowledge_facts_cache
+
         self._base = _parse_markdown(text)
-        self._mtime = self._path.stat().st_mtime
+        self._mtime = self._path.stat().st_mtime if self._path.exists() else None
+        reset_knowledge_facts_cache()
         return self._base
 
     def get(self) -> KnowledgeBase:
@@ -167,6 +186,11 @@ class KnowledgeStore:
                 return item
         return None
 
+    def match_modalidades(self, text: str) -> List[str]:
+        from .knowledge_facts import match_modalidades_in_text
+
+        return match_modalidades_in_text(text, self.get())
+
     def listar_modalidades(self) -> str:
         base = self.get()
         if not base.modalidades:
@@ -177,6 +201,68 @@ class KnowledgeStore:
             preco = item.campos.get("Preço mensal", "consultar secretaria")
             lines.append(f"- {item.nome}: {horarios} | {preco}")
         return "\n".join(lines)
+
+    def registered_modalidade_names(self) -> List[str]:
+        return [item.nome for item in self.get().modalidades.values()]
+
+    def association_label(self) -> str:
+        """Short association name extracted from the knowledge file."""
+        base = self.get()
+        sobre = base.secoes.get("sobre a associacao", "")
+        match = re.search(r"associaç[aã]o\s+([^,\.\n]+)", sobre, re.I)
+        if match:
+            return match.group(1).strip()
+        return base.titulo
+
+    def format_grounding_rules_for_prompt(self) -> str:
+        """Behavior rules derived from the current knowledge file (not hardcoded)."""
+        base = self.get()
+        names = self.registered_modalidade_names()
+        modalidades = ", ".join(names) if names else "consulte a seção de modalidades abaixo"
+        label = self.association_label()
+        return "\n".join(
+            [
+                "REGRAS DE ATENDIMENTO:",
+                "1. Use EXCLUSIVAMENTE os dados da base abaixo — nunca invente modalidades, horários, preços ou nomes.",
+                f"2. A associação: {label}. Cite somente as modalidades cadastradas: {modalidades}.",
+                "3. Se a informação não estiver na base, diga que não tem esse dado e use [HUMAN_HANDOVER].",
+                "4. Respostas curtas (2–4 frases), tom acolhedor de WhatsApp, sem emojis.",
+                "5. Não copie rótulos técnicos (P:/R:, \"Modalidade:\") — fale como pessoa real.",
+            ]
+        )
+
+    def format_full_context_for_prompt(self) -> str:
+        """Full knowledge block for LLM system prompts (single source of truth)."""
+        base = self.get()
+        parts = [
+            f"NOME OFICIAL DA ASSOCIAÇÃO: {base.titulo}",
+        ]
+        sobre = base.secoes.get("sobre a associacao")
+        if sobre:
+            parts.extend(["", "Sobre:", sobre])
+        contato = base.secoes.get("endereco e contato")
+        if contato:
+            parts.extend(["", "Endereço e contato:", contato])
+        parts.extend(
+            [
+                "",
+                "MODALIDADES CADASTRADAS (somente estas existem — nunca cite outras):",
+            ]
+        )
+        for item in base.modalidades.values():
+            parts.extend(["", item.as_text()])
+        precos = base.secoes.get("precos")
+        if precos:
+            parts.extend(["", "Preços:", precos])
+        matricula = base.secoes.get("matricula e pagamentos")
+        if matricula:
+            parts.extend(["", "Matrícula e pagamentos:", matricula])
+        if base.faq:
+            parts.append("")
+            parts.append("FAQ:")
+            for question, answer in base.faq.items():
+                parts.append(f"- {question}: {answer}")
+        return "\n".join(parts)
 
     def buscar_horarios(self, modalidade: str) -> str:
         item = self._match_modalidade(modalidade)

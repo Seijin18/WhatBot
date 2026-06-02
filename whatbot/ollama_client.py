@@ -10,8 +10,6 @@ import requests
 from .config import GEMINI_TEMPERATURE
 from .db import MessageRecord
 from .llm import LlmUnavailableError
-from .prompt_builder import build_enriched_system_prompt
-
 logger = logging.getLogger("whatbot.ollama")
 
 
@@ -35,12 +33,7 @@ class OllamaClient:
         recent_history: List[MessageRecord],
         user_message: str,
     ) -> list[dict[str, str]]:
-        messages = [
-            {
-                "role": "system",
-                "content": build_enriched_system_prompt(system_prompt),
-            }
-        ]
+        messages = [{"role": "system", "content": system_prompt}]
         for record in reversed(recent_history):
             role = "user" if record.direction == "in" else "assistant"
             messages.append({"role": role, "content": record.text})

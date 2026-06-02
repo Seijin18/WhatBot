@@ -211,6 +211,8 @@ class GeminiClient:
         return contents
 
     def _legacy_system_prompt(self, system_prompt: str) -> str:
+        if "=== BASE DE CONHECIMENTO" in system_prompt:
+            return system_prompt
         return build_enriched_system_prompt(system_prompt)
 
     def _generate_plain(

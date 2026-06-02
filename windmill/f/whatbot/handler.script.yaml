@@ -1,8 +1,9 @@
 summary: WhatBot WhatsApp handler
-description: Recebe webhooks da Evolution API e responde via Gemini
+description: Recebe webhooks da Evolution API e responde via Ollama/Gemini
 lock: ''
 kind: script
 no_main_func: false
+timeout: 180
 schema:
   $schema: 'https://json-schema.org/draft/2020-12/schema'
   type: object

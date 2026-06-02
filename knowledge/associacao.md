@@ -2,9 +2,7 @@
 
 ## Sobre a associação
 
-Agradecemos o seu contato! Somos uma associação desportiva e cultural com aulas de judô e yoga.
-Para agendar aula experimental ou matrícula, entre em contato pela secretaria ou responda
-com os dados solicitados na seção de aula experimental.
+Agradecemos o seu contato! Somos a associação Kannon Do, uma associação desportiva e cultural com aulas de judô e yoga. Para agendar aula experimental ou matrícula, entre em contato pela secretaria ou responda com os dados solicitados na seção de aula experimental.
 
 ## Endereço e contato
 

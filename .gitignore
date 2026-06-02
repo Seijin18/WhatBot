@@ -25,6 +25,7 @@ htmlcov/
 health_report.json
 instance_info.json
 qrcode.html
+logs/
 
 # IDE / OS
 .idea/

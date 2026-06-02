@@ -1,0 +1,389 @@
+"""Structured facts and semantic helpers derived from the knowledge Markdown."""
+
+from __future__ import annotations
+
+import re
+import unicodedata
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Set
+
+from .knowledge import KnowledgeBase, get_knowledge_store
+
+_DAY_ALIASES: Dict[str, str] = {
+    "segunda": "segunda",
+    "segundas": "segunda",
+    "terca": "terca",
+    "tercas": "terca",
+    "quarta": "quarta",
+    "quartas": "quarta",
+    "quinta": "quinta",
+    "quintas": "quinta",
+    "sexta": "sexta",
+    "sextas": "sexta",
+    "sabado": "sabado",
+    "sabados": "sabado",
+    "domingo": "domingo",
+    "domingos": "domingo",
+}
+
+_DAY_LABELS = {
+    "segunda": "segunda-feira",
+    "terca": "terça-feira",
+    "quarta": "quarta-feira",
+    "quinta": "quinta-feira",
+    "sexta": "sexta-feira",
+    "sabado": "sábado",
+    "domingo": "domingo",
+}
+
+# Minimal conversational patterns not present as KB sections
+_BASE_GREETING_SIGNALS = frozenset(
+    {"ola", "oi", "bom dia", "boa tarde", "boa noite", "e ai", "e aí"}
+)
+
+
+def norm_text(text: str) -> str:
+    folded = unicodedata.normalize("NFKD", text)
+    ascii_text = folded.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", ascii_text.lower().strip())
+
+
+def extract_days(text: str) -> List[str]:
+    n = norm_text(text)
+    found: list[str] = []
+    for alias, canonical in _DAY_ALIASES.items():
+        if alias in n and canonical not in found:
+            found.append(canonical)
+    return found
+
+
+def day_label(day: str) -> str:
+    return _DAY_LABELS.get(day, day)
+
+
+def extract_money_values(text: str) -> List[int]:
+    values: list[int] = []
+    for match in re.finditer(r"r\$\s*(\d+(?:[.,]\d+)?)", norm_text(text)):
+        raw = match.group(1).replace(",", ".")
+        try:
+            values.append(int(float(raw)))
+        except ValueError:
+            continue
+    return values
+
+
+def match_modalidades_in_text(text: str, base: KnowledgeBase) -> List[str]:
+    """Return registered modalidade names mentioned in text (longest match first)."""
+    n = norm_text(text)
+    hits: list[tuple[int, str]] = []
+    for item in base.modalidades.values():
+        name_norm = norm_text(item.nome)
+        score = 0
+        if name_norm in n:
+            score += 5
+        for token in name_norm.split():
+            if len(token) < 3:
+                continue
+            if token in n:
+                score += 2 if len(token) >= 5 else 1
+        if score > 0:
+            hits.append((score, item.nome))
+    hits.sort(key=lambda x: (-x[0], x[1]))
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for _, name in hits:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+def _link_label_to_modalidades(label: str, base: KnowledgeBase) -> List[str]:
+    matched = match_modalidades_in_text(label, base)
+    if matched:
+        return matched
+    label_norm = norm_text(label)
+    for item in base.modalidades.values():
+        name_norm = norm_text(item.nome)
+        label_tokens = [t for t in label_norm.split() if len(t) >= 4]
+        name_tokens = [t for t in name_norm.split() if len(t) >= 4]
+        if label_tokens and any(t in name_tokens or t in name_norm for t in label_tokens):
+            matched.append(item.nome)
+    return list(dict.fromkeys(matched)) or [label.strip()]
+
+
+@dataclass
+class ExperimentalSlot:
+    """One experimental booking line from matrícula (e.g. judô → quinta)."""
+
+    label: str
+    days: List[str]
+    modalidades: List[str]
+
+    def primary_name(self) -> str:
+        return self.modalidades[0] if self.modalidades else self.label
+
+
+@dataclass
+class KnowledgeFacts:
+    """Canonical facts extracted from the knowledge base."""
+
+    association_name: str
+    modalidade_names: List[str]
+    experimental_slots: List[ExperimentalSlot] = field(default_factory=list)
+    regular_days_by_modalidade: Dict[str, List[str]] = field(default_factory=dict)
+    monthly_price: Optional[int] = None
+    semester_price: Optional[int] = None
+    known_plan_prices: Set[int] = field(default_factory=set)
+    intent_signals: Dict[str, Set[str]] = field(default_factory=dict)
+    experimental_has_price: bool = False
+
+    @property
+    def high_risk_intents(self) -> frozenset[str]:
+        risks: set[str] = set()
+        if self.experimental_slots:
+            risks.add("experimental")
+        if self.monthly_price is not None or self.semester_price is not None:
+            risks.add("precos")
+        return frozenset(risks)
+
+    def match_modalidades(self, text: str) -> List[str]:
+        from .knowledge import get_knowledge_store
+
+        return match_modalidades_in_text(text, get_knowledge_store().get())
+
+    def experimental_days_for(self, modality_ref: str) -> List[str]:
+        ref = norm_text(modality_ref)
+        for slot in self.experimental_slots:
+            if ref == norm_text(slot.label):
+                return slot.days
+            for name in slot.modalidades:
+                if ref == norm_text(name) or ref in norm_text(name) or norm_text(name) in ref:
+                    return slot.days
+        for slot in self.experimental_slots:
+            for name in slot.modalidades:
+                if any(t in ref for t in norm_text(name).split() if len(t) >= 4):
+                    return slot.days
+        return []
+
+    def resolve_modalidades(
+        self,
+        text: str,
+        session_modalidades: Optional[List[str]] = None,
+    ) -> List[str]:
+        found = self.match_modalidades(text)
+        if session_modalidades:
+            for name in session_modalidades:
+                if name not in found:
+                    found.append(name)
+        return found
+
+    def primary_modalidade(
+        self,
+        text: str,
+        session_modalidades: Optional[List[str]] = None,
+    ) -> Optional[str]:
+        mods = self.resolve_modalidades(text, session_modalidades)
+        return mods[0] if mods else None
+
+    def experimental_slot_for(self, modality_ref: str) -> Optional[ExperimentalSlot]:
+        ref = norm_text(modality_ref)
+        for slot in self.experimental_slots:
+            if ref == norm_text(slot.label):
+                return slot
+            for name in slot.modalidades:
+                if ref == norm_text(name) or ref in norm_text(name):
+                    return slot
+        return None
+
+    def score_intents(self, text: str) -> Dict[str, int]:
+        n = norm_text(text)
+        scores: Dict[str, int] = {}
+        for intent, tokens in self.intent_signals.items():
+            score = sum(1 for token in tokens if token in n)
+            if score:
+                scores[intent] = score
+        return scores
+
+
+def _parse_experimental_slots(matricula_text: str, base: KnowledgeBase) -> List[ExperimentalSlot]:
+    slots: list[ExperimentalSlot] = []
+    for line in matricula_text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        body = stripped[2:]
+        match = re.search(
+            r"aula experimental de\s+([^:]+):\s*(.+)",
+            body,
+            re.I,
+        )
+        if not match:
+            continue
+        label = match.group(1).strip()
+        days = extract_days(match.group(2))
+        if not days:
+            continue
+        slots.append(
+            ExperimentalSlot(
+                label=label,
+                days=days,
+                modalidades=_link_label_to_modalidades(label, base),
+            )
+        )
+    return slots
+
+
+def _parse_regular_days(base: KnowledgeBase) -> Dict[str, List[str]]:
+    result: Dict[str, List[str]] = {}
+    for item in base.modalidades.values():
+        freq = item.campos.get("Frequência", "")
+        horarios = item.campos.get("Horários", "")
+        days = extract_days(f"{freq} {horarios}")
+        if days:
+            result[item.nome] = days
+    for question, answer in base.faq.items():
+        qn = norm_text(question)
+        if "dia" not in qn and "horario" not in qn:
+            continue
+        days = extract_days(answer)
+        if not days:
+            continue
+        linked = match_modalidades_in_text(f"{question} {answer}", base)
+        if linked:
+            for name in linked:
+                result.setdefault(name, days)
+        else:
+            result.setdefault(question, days)
+    return result
+
+
+def _parse_prices(base: KnowledgeBase) -> tuple[Optional[int], Optional[int], Set[int]]:
+    monthly: Optional[int] = None
+    semester: Optional[int] = None
+    known: set[int] = set()
+    for item in base.modalidades.values():
+        for key, value in item.campos.items():
+            kn = norm_text(key)
+            vals = extract_money_values(value)
+            if not vals:
+                continue
+            known.update(vals)
+            if "mensal" in kn and monthly is None:
+                monthly = vals[0]
+            if "semestral" in kn and semester is None:
+                semester = vals[0]
+    if monthly is None or semester is None:
+        precos = base.secoes.get("precos", "")
+        vals = extract_money_values(precos)
+        known.update(vals)
+        if vals:
+            if monthly is None:
+                monthly = vals[0]
+            if semester is None and len(vals) > 1:
+                semester = vals[1]
+    return monthly, semester, known
+
+
+def _tokens_from_bullets(text: str, min_len: int = 4) -> Set[str]:
+    tokens: set[str] = set()
+    for line in text.splitlines():
+        line = line.strip().lstrip("- ").strip()
+        for word in re.findall(r"[a-zà-ú]{3,}", norm_text(line)):
+            if len(word) >= min_len:
+                tokens.add(word)
+    return tokens
+
+
+def _build_intent_signals(base: KnowledgeBase) -> Dict[str, Set[str]]:
+    signals: Dict[str, Set[str]] = defaultdict(set)
+    signals["greeting"].update(_BASE_GREETING_SIGNALS)
+
+    for item in base.modalidades.values():
+        for key in item.campos:
+            kn = norm_text(key)
+            if any(t in kn for t in ("preco", "mensal", "semestral", "valor")):
+                signals["precos"].update(
+                    {"preco", "preço", "valor", "valores", "quanto custa", "mensalidade", "plano"}
+                )
+            if any(t in kn for t in ("horario", "frequencia")):
+                signals["horarios"].update(
+                    {"horario", "horário", "horarios", "horários", "que horas", "quando"}
+                )
+
+    matricula = base.secoes.get("matricula e pagamentos", "")
+    if matricula:
+        matricula_norm = norm_text(matricula)
+        if "experimental" in matricula_norm:
+            for line in matricula.splitlines():
+                if "experimental" in norm_text(line):
+                    signals["experimental"].update(_tokens_from_bullets(line))
+            signals["experimental"].update(
+                {"experimental", "experimentar", "aula experimental"}
+            )
+        signals["matricula"].update(
+            {t for t in _tokens_from_bullets(matricula) if any(x in t for x in ("matric", "inscri", "pagament"))}
+            | {"matricula", "matrícula", "inscrever", "cadastr"}
+        )
+
+    precos = base.secoes.get("precos", "")
+    if precos:
+        signals["precos"].update(_tokens_from_bullets(precos))
+
+    for question, answer in base.faq.items():
+        qn = norm_text(question)
+        blob = f"{qn} {norm_text(answer)}"
+        if any(t in qn for t in ("preco", "custo", "valor", "quanto")):
+            signals["precos"].update(_tokens_from_bullets(question + " " + answer, 3))
+        if any(t in qn for t in ("horario", "dia", "quando")):
+            signals["horarios"].update(_tokens_from_bullets(question, 3))
+        if "experimental" in blob or "agendo" in qn:
+            signals["experimental"].update(_tokens_from_bullets(question + " " + answer, 3))
+        if any(t in qn for t in ("endereco", "onde", "local", "levar", "chinelo")):
+            signals["faq"].update(_tokens_from_bullets(question, 3))
+        if any(t in qn for t in ("quem", "sobre", "nome", "diferenca")):
+            signals["faq"].update(_tokens_from_bullets(question, 3))
+
+    contato = base.secoes.get("endereco e contato", "")
+    if contato:
+        signals["faq"].update({"endereco", "endereço", "onde fica", "local", "maps"})
+
+    sobre = base.secoes.get("sobre a associacao", "")
+    if sobre:
+        signals["faq"].update({"sobre", "quem", "associacao", "associação"})
+
+    signals["horarios"].update({"modalidade", "modalidades", "atividades", "o que voces tem", "o que oferece"})
+
+    return {k: v for k, v in signals.items() if v}
+
+
+def build_facts_from_base(base: KnowledgeBase) -> KnowledgeFacts:
+    matricula = base.secoes.get("matricula e pagamentos", "")
+    monthly, semester, known = _parse_prices(base)
+    return KnowledgeFacts(
+        association_name=base.titulo,
+        modalidade_names=[item.nome for item in base.modalidades.values()],
+        experimental_slots=_parse_experimental_slots(matricula, base),
+        regular_days_by_modalidade=_parse_regular_days(base),
+        monthly_price=monthly,
+        semester_price=semester,
+        known_plan_prices=known,
+        intent_signals=_build_intent_signals(base),
+        experimental_has_price=False,
+    )
+
+
+_facts: KnowledgeFacts | None = None
+
+
+def get_knowledge_facts() -> KnowledgeFacts:
+    global _facts
+    if _facts is None:
+        _facts = build_facts_from_base(get_knowledge_store().get())
+    return _facts
+
+
+def reset_knowledge_facts_cache() -> None:
+    global _facts
+    _facts = None
