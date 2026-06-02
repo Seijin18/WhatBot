@@ -1,0 +1,195 @@
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: whatbot
+      POSTGRES_PASSWORD: whatbot
+      POSTGRES_DB: whatbot
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U whatbot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  evolution-db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: evolution
+      POSTGRES_PASSWORD: evolution
+      POSTGRES_DB: evolution
+    volumes:
+      - evolution_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evolution"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+
+  evolution-api:
+    container_name: evolution_api
+    image: evoapicloud/evolution-api:v2.3.7
+    restart: always
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      DATABASE_CONNECTION_URI: postgresql://evolution:evolution@evolution-db:5432/evolution?schema=public
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: "redis://redis:6379/0"
+      AUTHENTICATION_API_KEY: change-me
+      AUTHENTICATION_JWT_ENABLED: "false"
+      WEBHOOK_DRIVER: "http"
+      SERVER_URL: http://localhost:8080
+      WEBSOCKET_ENABLED: "true"
+      QRCODE_LIMIT: "30"
+      CONFIG_SESSION_PHONE_CLIENT: Chrome
+      CONFIG_SESSION_PHONE_NAME: Chrome
+      NODE_OPTIONS: --dns-result-order=ipv4first
+    volumes:
+      - evolution_instances:/evolution/instances
+    depends_on:
+      evolution-db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  whatbot:
+    profiles:
+      - bot
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - ./:/app
+    environment:
+      EVOLUTION_API_BASE_URL: http://evolution-api:8080
+    depends_on:
+      db:
+        condition: service_healthy
+      evolution-db:
+        condition: service_healthy
+      evolution-api:
+        condition: service_started
+    command: sh -c "sleep 5 && python -m whatbot.main"
+
+  windmill-db:
+    profiles:
+      - windmill
+    image: postgres:16
+    shm_size: 1g
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: windmill
+    volumes:
+      - windmill_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  windmill-server:
+    profiles:
+      - windmill
+    container_name: windmill_server
+    image: ghcr.io/windmill-labs/windmill:main
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgres://postgres:changeme@windmill-db:5432/windmill?sslmode=disable
+      MODE: server
+      BASE_URL: http://localhost:8000
+    depends_on:
+      windmill-db:
+        condition: service_healthy
+    volumes:
+      - windmill_worker_logs:/tmp/windmill/logs
+
+  windmill-worker:
+    profiles:
+      - windmill
+    container_name: windmill_worker
+    image: ghcr.io/windmill-labs/windmill:main
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://postgres:changeme@windmill-db:5432/windmill?sslmode=disable
+      MODE: worker
+      WORKER_GROUP: default
+      DB_DSN: postgresql://whatbot:whatbot@db:5432/whatbot
+      EVOLUTION_API_BASE_URL: http://evolution-api:8080
+      ADDITIONAL_PYTHON_PATHS: /whatbot
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/whatbot
+      - windmill_worker_cache:/tmp/windmill/cache
+      - windmill_worker_logs:/tmp/windmill/logs
+    depends_on:
+      windmill-db:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+
+  windmill-worker-native:
+    profiles:
+      - windmill
+    container_name: windmill_worker_native
+    image: ghcr.io/windmill-labs/windmill:main
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://postgres:changeme@windmill-db:5432/windmill?sslmode=disable
+      MODE: worker
+      WORKER_GROUP: native
+      NATIVE_MODE: "true"
+      SLEEP_QUEUE: "200"
+      DB_DSN: postgresql://whatbot:whatbot@db:5432/whatbot
+      EVOLUTION_API_BASE_URL: http://evolution-api:8080
+      PYTHONPATH: /whatbot
+    volumes:
+      - ./:/whatbot
+      - windmill_worker_logs:/tmp/windmill/logs
+    depends_on:
+      windmill-db:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+
+  ollama:
+    profiles:
+      - ollama
+    container_name: ollama
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  db_data:
+  evolution_db_data:
+  evolution_instances:
+  redis_data:
+  windmill_db_data:
+  windmill_worker_logs:
+  windmill_worker_cache:
+  ollama_data:

@@ -1,0 +1,24 @@
+summary: WhatBot WhatsApp handler
+description: Recebe webhooks da Evolution API e responde via Gemini
+lock: ''
+kind: script
+no_main_func: false
+schema:
+  $schema: 'https://json-schema.org/draft/2020-12/schema'
+  type: object
+  properties:
+    event:
+      type: string
+      description: Evento Evolution API
+      default: null
+    instance:
+      type: string
+      description: Nome da instancia
+      default: null
+    data:
+      type: object
+      description: Dados da mensagem
+      default: null
+      properties: {}
+  required: []
+tag: python3
