@@ -19,8 +19,13 @@ from .config import (
     resolve_simulate_phone,
     should_respond_to_customer,
 )
+from .channels import (
+    DEFAULT_CHANNEL,
+    ChannelRouter,
+    EvolutionApiClient,
+    normalize_channel,
+)
 from .db import Database
-from .whatsapp import WhatsAppClient
 from .llm import LlmUnavailableError, create_llm_client
 from .domain import (
     build_handover_customer_message,
@@ -60,12 +65,12 @@ MODEL_UNAVAILABLE_MSG = (
 
 
 _db: Database | None = None
-_whatsapp: WhatsAppClient | None = None
+_router: ChannelRouter | None = None
 _llm = None
 
 
 def _init_infra() -> None:
-    global _db, _whatsapp, _llm
+    global _db, _router, _llm
     bootstrap_env()
     if _db is None:
         dsn = resolve_db_dsn(os.getenv(ENV_DB_DSN))
@@ -73,7 +78,7 @@ def _init_infra() -> None:
             raise RuntimeError("DB_DSN não configurado")
         _db = Database(dsn)
         _db.ensure_schema()
-    if _whatsapp is None:
+    if _router is None:
         api_key = os.getenv(ENV_EVOLUTION_API_KEY)
         instance_name = os.getenv(ENV_EVOLUTION_API_INSTANCE_NAME)
         base_url = resolve_evolution_base_url(os.getenv("EVOLUTION_API_BASE_URL"))
@@ -81,9 +86,13 @@ def _init_infra() -> None:
             raise RuntimeError(
                 "EVOLUTION_API_KEY ou EVOLUTION_API_INSTANCE_NAME não configurados"
             )
-        _whatsapp = WhatsAppClient(
-            api_key=api_key, instance_name=instance_name, base_url=base_url
+        _router = ChannelRouter()
+        _router.register(
+            EvolutionApiClient(
+                api_key=api_key, instance_name=instance_name, base_url=base_url
+            )
         )
+        logger.info("Canais ativos: %s", ", ".join(_router.channels))
     if _llm is None:
         _llm = create_llm_client()
     if is_test_mode():
@@ -153,7 +162,7 @@ def run_admin_simulation(
             f"{reply}\n\n_(Handover simulado — o bot pararia de responder a este cliente.)_"
         )
     try:
-        _whatsapp.send_text(
+        _router.send_admin_text(
             admin_phone,
             f"🧪 *Teste como cliente* ({sim_phone}):\n{reply}",
             source="simulation",
@@ -172,7 +181,7 @@ def check_queue(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     except Exception as e:
         logger.exception("Erro inicializando infra: %s", e)
         return {"ok": False, "error": "infra_init_failed", "detail": str(e)}
-    return {"ok": True, **run_periodic_queue_checks(_db, _whatsapp)}
+    return {"ok": True, **run_periodic_queue_checks(_db, _router)}
 
 
 def process_customer_message(
@@ -180,11 +189,13 @@ def process_customer_message(
     text: str,
     push_name: str | None = None,
     simulated: bool = False,
+    canal: str | None = None,
 ) -> Dict[str, Any]:
     """Handle an inbound customer message (or admin simulation)."""
+    canal = normalize_channel(canal)
     queue_check: Dict[str, Any] = {}
     try:
-        queue_check = check_long_wait_notifications(_db, _whatsapp)
+        queue_check = check_long_wait_notifications(_db, _router)
     except Exception:
         logger.exception("Falha ao verificar fila de espera prolongada")
 
@@ -245,13 +256,14 @@ def process_customer_message(
             result = executar_handover_para_secretaria(
                 phone=phone,
                 contact_id=contact.id,
-                whatsapp=_whatsapp,
+                router=_router,
                 db=_db,
                 logger=logger,
                 motivo="pedido_do_cliente",
                 push_name=push_name,
                 user_message=text,
                 simulated=simulated,
+                canal=canal,
             )
             result["queue_check"] = queue_check
             result["simulated"] = simulated
@@ -309,9 +321,10 @@ def process_customer_message(
             response_mode = "fallback"
             if not model_reply:
                 if not simulated:
-                    _whatsapp.send_text(
+                    _router.send_text(
                         phone,
                         MODEL_UNAVAILABLE_MSG,
+                        canal=canal,
                         source="system",
                         contact_id=contact.id,
                     )
@@ -324,9 +337,10 @@ def process_customer_message(
             response_mode = "fallback"
             if not model_reply:
                 if not simulated:
-                    _whatsapp.send_text(
+                    _router.send_text(
                         phone,
                         MODEL_UNAVAILABLE_MSG,
+                        canal=canal,
                         source="system",
                         contact_id=contact.id,
                     )
@@ -379,7 +393,7 @@ def process_customer_message(
             result = executar_handover_para_secretaria(
                 phone=phone,
                 contact_id=contact.id,
-                whatsapp=_whatsapp,
+                router=_router,
                 db=_db,
                 logger=logger,
                 motivo="decisao_do_modelo",
@@ -387,6 +401,7 @@ def process_customer_message(
                 user_message=text,
                 simulated=simulated,
                 customer_message=build_handover_customer_message(model_reply),
+                canal=canal,
             )
             result["queue_check"] = queue_check
             result["simulated"] = simulated
@@ -397,9 +412,10 @@ def process_customer_message(
 
     try:
         if not simulated:
-            _whatsapp.send_text(
+            _router.send_text(
                 phone,
                 model_reply,
+                canal=canal,
                 source="bot",
                 contact_id=contact.id,
             )
@@ -462,10 +478,10 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "hint": "Use o celular pessoal admin ou #simular para testar o bot",
                 }
             result = handle_staff_outgoing_message(
-                outgoing["to_number"], _db, _whatsapp
+                outgoing["to_number"], _db, _router
             )
             try:
-                result["queue_check"] = check_long_wait_notifications(_db, _whatsapp)
+                result["queue_check"] = check_long_wait_notifications(_db, _router)
             except Exception:
                 logger.exception("Falha ao verificar fila após resposta staff")
             return result
@@ -476,7 +492,12 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         {k: payload.get(k) for k in ("from_number", "text", "push_name")},
     )
 
-    phone = payload.get("from_number") or payload.get("from")
+    canal = normalize_channel(payload.get("canal"))
+    phone = (
+        payload.get("from_number")
+        or payload.get("from")
+        or payload.get("external_id")
+    )
     text = (payload.get("text") or payload.get("message") or "").strip()
     push_name = payload.get("push_name")
 
@@ -505,7 +526,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
                 phone=phone,
                 text=text,
                 db=_db,
-                whatsapp=_whatsapp,
+                router=_router,
                 contact_id=contact.id,
             )
             return result
@@ -518,7 +539,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("Modo teste: ignorando mensagem de %s (fora de TEST_PHONES)", phone)
         return {"ok": True, "ignored": True, "reason": "test_mode"}
 
-    return process_customer_message(phone, text, push_name=push_name)
+    return process_customer_message(phone, text, push_name=push_name, canal=canal)
 
 
 if __name__ == "__main__":

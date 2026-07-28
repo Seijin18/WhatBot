@@ -18,6 +18,7 @@ from .config import (
     NOTIFY_LONG_WAIT_MINUTES,
     NOTIFY_QUEUE_BATCH,
 )
+from .channels import send_admin
 from .db import Database, WaitingContact
 from .priority import prioridade_label
 
@@ -78,10 +79,11 @@ def format_waiting_list(
 
 
 def notify_admin(
-    whatsapp,
+    router,
     message: str,
     exclude_phones: List[str] | None = None,
 ) -> bool:
+    """Notify admins. Always delivered on the admin channel (WhatsApp)."""
     admins = get_admin_phones()
     if not admins:
         logger.debug("ADMIN_NOTIFY_PHONES não configurado; notificação ignorada")
@@ -92,7 +94,7 @@ def notify_admin(
         if admin_phone in excluded:
             continue
         try:
-            whatsapp.send_text(admin_phone, message, source="admin_notify")
+            send_admin(router, admin_phone, message, source="admin_notify")
             logger.info("Notificação enviada ao admin %s", admin_phone)
             sent = True
         except Exception:
@@ -101,13 +103,13 @@ def notify_admin(
     return sent
 
 
-def notify_all_admins_except(whatsapp, message: str, except_phone: str) -> bool:
-    return notify_admin(whatsapp, message, exclude_phones=[except_phone])
+def notify_all_admins_except(router, message: str, except_phone: str) -> bool:
+    return notify_admin(router, message, exclude_phones=[except_phone])
 
 
 def process_new_handover(
     db: Database,
-    whatsapp,
+    router,
     contact: WaitingContact | None = None,
 ) -> dict:
     """Notify admins immediately and on batch threshold."""
@@ -120,7 +122,7 @@ def process_new_handover(
             f"🆕 *Novo na fila* — {contact.push_name or 'Sem nome'} ({contact.phone})\n"
             f"Prioridade: {prio} | Total na fila: {len(waiting)}"
         )
-        if notify_admin(whatsapp, msg):
+        if notify_admin(router, msg):
             result["immediate"] = True
 
     if result["batch_count"] >= NOTIFY_QUEUE_BATCH:
@@ -130,7 +132,7 @@ def process_new_handover(
             f"(lote de {NOTIFY_QUEUE_BATCH} handovers)"
         )
         message = format_waiting_list(waiting, title, include_last_message=True, db=db)
-        if notify_admin(whatsapp, message):
+        if notify_admin(router, message):
             db.reset_handover_batch()
             result["notified"] = True
             result["reason"] = "batch_threshold"
@@ -141,7 +143,7 @@ def process_new_handover(
 def handle_staff_outgoing_message(
     to_phone: str,
     db: Database,
-    whatsapp,
+    router,
 ) -> dict:
     """When secretariat replies via WhatsApp Business, auto-complete queue entry."""
     waiting = db.get_contact_waiting(to_phone)
@@ -156,7 +158,7 @@ def handle_staff_outgoing_message(
     ):
         name = waiting.push_name or to_phone
         notify_admin(
-            whatsapp,
+            router,
             f"✅ *{name}* ({to_phone}) atendido via WhatsApp Business.\n"
             f"Bot reativa automaticamente em {AUTO_REACTIVATE_HOURS}h.",
         )
@@ -167,7 +169,7 @@ def handle_staff_outgoing_message(
 
 
 def notify_assumption(
-    whatsapp,
+    router,
     admin_phone: str,
     contact: WaitingContact,
 ) -> None:
@@ -178,10 +180,10 @@ def notify_assumption(
         f"📌 *Atendimento assumido*\n"
         f"{name} ({contact.phone}) — por {admin_phone}"
     )
-    notify_all_admins_except(whatsapp, msg, admin_phone)
+    notify_all_admins_except(router, msg, admin_phone)
 
 
-def check_long_wait_notifications(db: Database, whatsapp) -> dict:
+def check_long_wait_notifications(db: Database, router) -> dict:
     if not get_admin_phones():
         return {"checked": True, "notified": False}
 
@@ -194,7 +196,7 @@ def check_long_wait_notifications(db: Database, whatsapp) -> dict:
         f"há mais de {NOTIFY_LONG_WAIT_MINUTES} min"
     )
     message = format_waiting_list(unnotified, title, include_last_message=True, db=db)
-    if notify_admin(whatsapp, message):
+    if notify_admin(router, message):
         db.mark_long_wait_notified([c.id for c in unnotified])
         return {"checked": True, "notified": True, "count": len(unnotified)}
     return {"checked": True, "notified": False}
@@ -215,7 +217,7 @@ def build_daily_summary(db: Database, day: date | None = None) -> str:
     )
 
 
-def send_daily_summary_if_due(db: Database, whatsapp) -> dict:
+def send_daily_summary_if_due(db: Database, router) -> dict:
     if not get_admin_phones():
         return {"sent": False, "reason": "no_admins"}
 
@@ -229,22 +231,22 @@ def send_daily_summary_if_due(db: Database, whatsapp) -> dict:
         return {"sent": False, "reason": "already_sent"}
 
     message = build_daily_summary(db, today)
-    if notify_admin(whatsapp, message):
+    if notify_admin(router, message):
         db.mark_daily_summary_sent(today)
         return {"sent": True, "date": str(today)}
     return {"sent": False, "reason": "notify_failed"}
 
 
-def run_periodic_queue_checks(db: Database, whatsapp) -> dict:
+def run_periodic_queue_checks(db: Database, router) -> dict:
     reactivated = db.process_auto_reactivations()
     if reactivated:
         notify_admin(
-            whatsapp,
+            router,
             f"🤖 Bot reativado automaticamente para {len(reactivated)} contato(s):\n"
             + ", ".join(reactivated),
         )
-    long_wait = check_long_wait_notifications(db, whatsapp)
-    daily = send_daily_summary_if_due(db, whatsapp)
+    long_wait = check_long_wait_notifications(db, router)
+    daily = send_daily_summary_if_due(db, router)
     return {
         "reactivated": reactivated,
         "long_wait": long_wait,

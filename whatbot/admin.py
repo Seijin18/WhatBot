@@ -14,6 +14,7 @@ from .contact_resolver import (
     waiting_to_dict,
 )
 from .db import Database
+from .channels import send_admin
 from .queue import (
     build_daily_summary,
     format_waiting_list,
@@ -48,14 +49,14 @@ Se houver *duas Marias*, o bot pergunta qual delas (responda *1*, *2* ou o telef
 )
 
 
-def _reply(whatsapp, db, admin_phone: str, contact_id: int, text: str) -> dict:
-    whatsapp.send_text(admin_phone, text, source="admin")
+def _reply(router, db, admin_phone: str, contact_id: int, text: str) -> dict:
+    send_admin(router, admin_phone, text, source="admin")
     db.save_message(contact_id, direction="out", text=text)
     return {"ok": True, "admin_command": True, "reply": text}
 
 
 def _try_pending_disambiguation(
-    text: str, admin_phone: str, db: Database, whatsapp, contact_id: int
+    text: str, admin_phone: str, db: Database, router, contact_id: int
 ) -> dict | None:
     pending = db.get_admin_sessao(admin_phone)
     if not pending:
@@ -68,7 +69,7 @@ def _try_pending_disambiguation(
 
     db.clear_admin_sessao(admin_phone)
     return _execute_action(
-        acao, picked.phone, admin_phone, db, whatsapp, contact_id, picked.push_name
+        acao, picked.phone, admin_phone, db, router, contact_id, picked.push_name
     )
 
 
@@ -77,7 +78,7 @@ def _execute_action(
     target_phone: str,
     admin_phone: str,
     db: Database,
-    whatsapp,
+    router,
     contact_id: int,
     name: str | None = None,
 ) -> dict:
@@ -86,16 +87,16 @@ def _execute_action(
     if acao == "assume":
         contact = db.assumir_contato(target_phone, admin_phone)
         if contact:
-            notify_assumption(whatsapp, admin_phone, contact)
+            notify_assumption(router, admin_phone, contact)
             return _reply(
-                whatsapp,
+                router,
                 db,
                 admin_phone,
                 contact_id,
                 f"📌 Você assumiu *{label}* ({target_phone}).",
             )
         return _reply(
-            whatsapp, db, admin_phone, contact_id, f"{target_phone} não está na fila."
+            router, db, admin_phone, contact_id, f"{target_phone} não está na fila."
         )
 
     if acao == "complete":
@@ -106,34 +107,34 @@ def _execute_action(
             schedule_resume_hours=AUTO_REACTIVATE_HOURS,
         ):
             return _reply(
-                whatsapp,
+                router,
                 db,
                 admin_phone,
                 contact_id,
                 f"✅ *{label}* atendido. Bot reativa automaticamente em {AUTO_REACTIVATE_HOURS}h.",
             )
         return _reply(
-            whatsapp, db, admin_phone, contact_id, f"{target_phone} não está na fila."
+            router, db, admin_phone, contact_id, f"{target_phone} não está na fila."
         )
 
     if acao == "reactivate":
         if db.reativar_bot(target_phone):
             return _reply(
-                whatsapp,
+                router,
                 db,
                 admin_phone,
                 contact_id,
                 f"✅ Bot reativado para *{label}* ({target_phone}).",
             )
         return _reply(
-            whatsapp,
+            router,
             db,
             admin_phone,
             contact_id,
             f"Contato {target_phone} não encontrado.",
         )
 
-    return _reply(whatsapp, db, admin_phone, contact_id, "Ação desconhecida.")
+    return _reply(router, db, admin_phone, contact_id, "Ação desconhecida.")
 
 
 def _resolve_waiting(
@@ -196,13 +197,13 @@ def handle_admin_message(
     phone: str,
     text: str,
     db: Database,
-    whatsapp,
+    router,
     contact_id: int,
 ) -> dict:
     admin_phone = normalize_phone(phone)
     db.save_message(contact_id, direction="in", text=text)
 
-    pending = _try_pending_disambiguation(text, admin_phone, db, whatsapp, contact_id)
+    pending = _try_pending_disambiguation(text, admin_phone, db, router, contact_id)
     if pending:
         logger.info("Admin disambiguation resolved: %s", admin_phone)
         return pending
@@ -210,7 +211,7 @@ def handle_admin_message(
     intent = parse_admin_intent(text)
 
     if intent.action == "help":
-        return _reply(whatsapp, db, admin_phone, contact_id, HELP_TEXT)
+        return _reply(router, db, admin_phone, contact_id, HELP_TEXT)
 
     if intent.action == "list_queue":
         waiting = db.get_waiting_contacts()
@@ -220,11 +221,11 @@ def handle_admin_message(
             include_last_message=True,
             db=db,
         )
-        return _reply(whatsapp, db, admin_phone, contact_id, body)
+        return _reply(router, db, admin_phone, contact_id, body)
 
     if intent.action == "summary":
         return _reply(
-            whatsapp, db, admin_phone, contact_id, build_daily_summary(db)
+            router, db, admin_phone, contact_id, build_daily_summary(db)
         )
 
     if intent.action == "complete_all":
@@ -234,7 +235,7 @@ def handle_admin_message(
             schedule_resume_hours=AUTO_REACTIVATE_HOURS,
         )
         return _reply(
-            whatsapp,
+            router,
             db,
             admin_phone,
             contact_id,
@@ -244,29 +245,29 @@ def handle_admin_message(
     if intent.action == "assume" and intent.query:
         target, err = _resolve_waiting(intent.query, "assume", admin_phone, db)
         if err:
-            return _reply(whatsapp, db, admin_phone, contact_id, err)
+            return _reply(router, db, admin_phone, contact_id, err)
         return _execute_action(
-            "assume", target, admin_phone, db, whatsapp, contact_id
+            "assume", target, admin_phone, db, router, contact_id
         )
 
     if intent.action == "complete" and intent.query:
         target, err = _resolve_waiting(intent.query, "complete", admin_phone, db)
         if err:
-            return _reply(whatsapp, db, admin_phone, contact_id, err)
+            return _reply(router, db, admin_phone, contact_id, err)
         return _execute_action(
-            "complete", target, admin_phone, db, whatsapp, contact_id
+            "complete", target, admin_phone, db, router, contact_id
         )
 
     if intent.action == "reactivate" and intent.query:
         target, err = _resolve_reactivate(intent.query, admin_phone, db)
         if err:
-            return _reply(whatsapp, db, admin_phone, contact_id, err)
+            return _reply(router, db, admin_phone, contact_id, err)
         return _execute_action(
-            "reactivate", target, admin_phone, db, whatsapp, contact_id
+            "reactivate", target, admin_phone, db, router, contact_id
         )
 
     return _reply(
-        whatsapp,
+        router,
         db,
         admin_phone,
         contact_id,

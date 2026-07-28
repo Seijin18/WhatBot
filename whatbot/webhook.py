@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from .channels import WHATSAPP
+
 
 def _extract_text(message: Dict[str, Any]) -> str:
     if not message:
@@ -49,6 +51,7 @@ def parse_outgoing_staff_message(payload: Dict[str, Any]) -> Optional[Dict[str, 
     text = _extract_text(data.get("message") or {})
 
     return {
+        "canal": WHATSAPP,
         "to_number": _normalize_phone(remote_jid),
         "text": text or "[mensagem]",
         "from_me": True,
@@ -76,6 +79,7 @@ def parse_evolution_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]
         return None
 
     return {
+        "canal": WHATSAPP,
         "from_number": _normalize_phone(remote_jid),
         "text": text,
         "push_name": data.get("pushName"),

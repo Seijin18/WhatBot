@@ -65,7 +65,7 @@ def build_handover_customer_message(model_reply: str) -> str:
 def executar_handover_para_secretaria(
     phone: str,
     contact_id: int,
-    whatsapp,
+    router,
     db,
     logger,
     motivo: str = "pedido_do_cliente",
@@ -73,8 +73,14 @@ def executar_handover_para_secretaria(
     user_message: str | None = None,
     simulated: bool = False,
     customer_message: str | None = None,
+    canal: str | None = None,
 ) -> dict:
-    """Stop the bot, enqueue for secretariat, and notify admin if thresholds met."""
+    """Stop the bot, enqueue for secretariat, and notify admin if thresholds met.
+
+    The customer is answered on their own channel; admins are always notified on
+    the admin channel (WhatsApp).
+    """
+    from .channels import send_to_contact
     from .queue import check_long_wait_notifications, process_new_handover
 
     prioridade = calcular_prioridade_handover(user_message or "")
@@ -84,12 +90,15 @@ def executar_handover_para_secretaria(
         "Em breve um atendente humano continuará a conversa por aqui."
     )
     if not simulated:
-        whatsapp.send_text(
+        send_to_contact(
+            router,
             phone,
             handover_text,
+            canal=canal,
             source="handover",
             contact_id=contact_id,
             simulated=simulated,
+            human_agent=True,
         )
     db.save_message(contact_id, direction="out", text=handover_text)
     db.enroll_handover(
@@ -104,8 +113,8 @@ def executar_handover_para_secretaria(
         long_wait_result = {}
     else:
         waiting = db.get_contact_waiting(phone)
-        notify_result = process_new_handover(db, whatsapp, contact=waiting)
-        long_wait_result = check_long_wait_notifications(db, whatsapp)
+        notify_result = process_new_handover(db, router, contact=waiting)
+        long_wait_result = check_long_wait_notifications(db, router)
 
     return {
         "ok": True,
