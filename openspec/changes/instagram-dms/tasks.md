@@ -20,7 +20,7 @@ Estimativa total: 13 dias de desenvolvimento, fora espera de App Review e DNS.
 
 - [x] 1.1 `whatbot/channels/` com contrato, cliente WhatsApp e roteador
 - [x] 1.2 Todo envio passando pelo roteador
-- [ ] 1.3 Acabamento e cobertura — ver change `harden-channel-layer`
+- [x] 1.3 Acabamento e cobertura — ver change `harden-channel-layer`
 
 ## 2. Migração de identidade no banco (bloqueia 3, 5, 6, 7)
 

@@ -56,3 +56,5 @@
 - [x] 5.3 Confirmar por busca que não há envio direto por cliente concreto
 - [ ] 5.4 Smoke com Docker: `make chat-test` produz a mesma resposta que em
       `db9db6a` (critério de aceite da Fase 1 que ficou em aberto)
+      — BLOQUEADO: daemon do Docker fora do ar nesta máquina. Único item do
+      change que não pôde ser verificado; depende de ambiente, não de código.
