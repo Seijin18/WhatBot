@@ -8,12 +8,27 @@ repositório via `.claude/agents/`, `.claude/commands/` e `.mcp.json`.
 O `.mcp.json` já está na raiz do repositório (escopo de projeto, versionado no
 git) com três servidores: `zen`, `context-mode` e `codebase-memory`.
 
-Antes de usar o Zen, gere uma API key na OpenRouter (openrouter.ai) e, se for
-usar Kimi diretamente, adicione crédito (uns $5-10 já cobrem bastante tempo
-dado o custo de $1/$3 por milhão de tokens). Preencha `OPENROUTER_API_KEY` em
-`.mcp.json` — **não commite a key**, se for editar o arquivo prefira uma cópia
-local (`.mcp.local.json`) ou variável de ambiente, conforme o suporte do
-Claude Code na sua versão.
+Por enquanto o plano é usar o **tier free da OpenRouter** (modelos com sufixo
+`:free`, sem cobrança) — mesmo assim é preciso uma API key da OpenRouter
+(gratuita, gerada em openrouter.ai). O `.mcp.json` referencia
+`"${OPENROUTER_API_KEY}"`, que o Claude Code CLI expande a partir da variável
+de ambiente no momento em que o servidor sobe — **a key nunca fica em texto
+puro no arquivo versionado**.
+
+Defina a variável localmente antes de abrir o Claude Code (não é feito
+automaticamente — rode você mesmo):
+
+```powershell
+# só na sessão atual do terminal
+$env:OPENROUTER_API_KEY = "sua-key-aqui"
+
+# ou, para persistir entre sessões (nível de usuário)
+[Environment]::SetEnvironmentVariable("OPENROUTER_API_KEY", "sua-key-aqui", "User")
+```
+
+Atenção: o tier free da OpenRouter tem rate limit bem mais apertado que o
+pago — se o Zen começar a travar em rate limit no meio de uma sessão longa,
+esse é o motivo mais provável (ver seção 4).
 
 Depois, na raiz do projeto:
 
@@ -95,8 +110,9 @@ Teste com:
 
 ## 5. Checklist rápido
 
-- [ ] `.mcp.json` na raiz do projeto, com `OPENROUTER_API_KEY` preenchida
-      localmente (não commitada em texto claro)
+- [ ] Variável de ambiente `OPENROUTER_API_KEY` definida localmente (key free
+      da OpenRouter) — o `.mcp.json` só referencia `${OPENROUTER_API_KEY}`,
+      nunca a key literal
 - [ ] `.claude/agents/planner.md`, `critic.md`, `implementer.md`,
       `scope-explorer.md` no lugar
 - [ ] `claude mcp list` mostra zen, context-mode e codebase-memory ativos
