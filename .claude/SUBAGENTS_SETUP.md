@@ -11,30 +11,59 @@ git) com três servidores: `zen`, `context-mode` e `codebase-memory`.
 Por enquanto o plano é usar o **tier free da OpenRouter** (modelos com sufixo
 `:free`, sem cobrança) — mesmo assim é preciso uma API key da OpenRouter
 (gratuita, gerada em openrouter.ai). O `.mcp.json` referencia
-`"${OPENROUTER_API_KEY}"`, que o Claude Code CLI expande a partir da variável
-de ambiente no momento em que o servidor sobe — **a key nunca fica em texto
-puro no arquivo versionado**.
+`"${OPENROUTER_API_KEY}"` e `"${ZEN_MCP_SERVER_HOME}"`, que o Claude Code CLI
+expande a partir de variáveis de ambiente no momento em que o servidor sobe —
+**nenhum segredo/caminho fica em texto puro no arquivo versionado**.
 
-O Claude Code **não** carrega `.env` automaticamente para essa expansão (é um
-feature request ainda em aberto), então a key vive em
-`.claude/settings.local.json` — arquivo local, listado no `.gitignore`,
-carregado automaticamente pelo Claude Code em toda sessão:
+O Claude Code **não** carrega `.env` automaticamente, nem usa
+`.claude/settings.local.json` para essa expansão (testado e confirmado que
+não funciona) — só variáveis de ambiente reais do processo. No Windows, use
+variáveis de ambiente **persistentes de usuário** (não precisa setar de novo
+a cada terminal):
 
-```json
-{
-  "env": {
-    "OPENROUTER_API_KEY": "sua-key-aqui"
-  }
-}
+```powershell
+[Environment]::SetEnvironmentVariable("OPENROUTER_API_KEY", "sua-key-aqui", "User")
+[Environment]::SetEnvironmentVariable("ZEN_MCP_SERVER_HOME", "$env:USERPROFILE\.zen-mcp-server", "User")
 ```
 
-Não precisa setar variável de ambiente manualmente por sessão/terminal — uma
-vez que o arquivo existe, o Claude Code já resolve `${OPENROUTER_API_KEY}` no
-`.mcp.json` sozinho.
+Abra um terminal **novo** depois disso (só processos criados depois enxergam
+a mudança).
 
 Atenção: o tier free da OpenRouter tem rate limit bem mais apertado que o
 pago — se o Zen começar a travar em rate limit no meio de uma sessão longa,
 esse é o motivo mais provável (ver seção 4).
+
+### Setup do Zen (`ZEN_MCP_SERVER_HOME`)
+
+O `.mcp.json` chama o Zen (o projeto oficial `BeehiveInnovations/zen-mcp-server`,
+hoje rebatizado **PAL MCP** — "formerly known as Zen MCP") diretamente pelo
+Python de um venv local, sem depender de wrapper npx nenhum. Isso exige
+montar esse venv uma vez:
+
+```powershell
+# 1. bootstrap: deixa o instalador de conveniência clonar o repo e montar o venv
+npx -y zen-mcp-server-199bio
+# Ctrl+C assim que aparecer "Active tools: [...]" ou um erro — o objetivo aqui
+# é só clonar o repo e criar o venv em %USERPROFILE%\.zen-mcp-server
+
+# 2. o requirements.txt do projeto não tem teto de versão pro pacote `mcp`,
+#    então o pip pode puxar uma versão incompatível com o server.py — force
+#    uma versão 1.x, que é a que a API usada no código espera:
+cd $env:ZEN_MCP_SERVER_HOME
+.\venv\Scripts\python -m pip install "mcp<2.0.0"
+
+# 3. o instalador de conveniência espera um `run.py` que esse repo não tem
+#    (ele usa `server.py`) — cria um shim de uma linha:
+Set-Content -Path "$env:ZEN_MCP_SERVER_HOME\run.py" -Value 'import runpy
+runpy.run_path("server.py", run_name="__main__")' -Encoding utf8
+
+cd C:\Projetos\WhatBot
+```
+
+Isso é uma correção pontual de bugs do instalador `zen-mcp-server-199bio`
+nessa versão, num Windows sem WSL — não deveria ser necessário todo setup,
+mas foi o que resolveu aqui. Se o repo oficial atualizar o `run.py` ou pinar
+a versão do `mcp` corretamente, esses passos deixam de ser necessários.
 
 Depois, na raiz do projeto:
 
@@ -43,11 +72,8 @@ Depois, na raiz do projeto:
 claude mcp list
 ```
 
-Os nomes de pacote em `.mcp.json` (`zen-mcp-server-199bio`, `context-mode`,
-`codebase-memory-mcp`) foram inferidos a partir da documentação pública desses
-projetos — o `.mcp.json` original não veio junto com os subagentes. Confirme
-com `claude mcp list` que os três aparecem ativos; se algum pacote tiver
-mudado de nome, ajuste `.mcp.json` de acordo.
+`context-mode` e `codebase-memory` são pacotes npm padrão, sem esse problema
+— sobem direto com `npx -y context-mode` / `npx -y codebase-memory-mcp`.
 
 ## 2. Subagentes e comandos
 
@@ -116,10 +142,14 @@ Teste com:
 
 ## 5. Checklist rápido
 
-- [ ] `.claude/settings.local.json` com `OPENROUTER_API_KEY` (key free da
-      OpenRouter) — gitignored, o `.mcp.json` só referencia
-      `${OPENROUTER_API_KEY}`, nunca a key literal
+- [ ] Variáveis de ambiente de usuário `OPENROUTER_API_KEY` (key free da
+      OpenRouter) e `ZEN_MCP_SERVER_HOME` definidas via
+      `[Environment]::SetEnvironmentVariable(..., "User")` — o `.mcp.json` só
+      referencia `${OPENROUTER_API_KEY}` / `${ZEN_MCP_SERVER_HOME}`, nunca
+      valores literais
 - [ ] `claude` disponível no PATH (`npm install -g @anthropic-ai/claude-code`)
+- [ ] `%ZEN_MCP_SERVER_HOME%\venv` montado com `mcp<2.0.0` instalado e
+      `run.py` presente (ver "Setup do Zen" acima)
 - [ ] `.claude/agents/planner.md`, `critic.md`, `implementer.md`,
       `scope-explorer.md` no lugar
 - [ ] `claude mcp list` mostra zen, context-mode e codebase-memory ativos

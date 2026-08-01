@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "zen": {
-      "command": "npx",
-      "args": ["-y", "zen-mcp-server-199bio"],
+      "command": "${ZEN_MCP_SERVER_HOME}\\venv\\Scripts\\python.exe",
+      "args": ["${ZEN_MCP_SERVER_HOME}\\run.py"],
       "env": {
         "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
       }
