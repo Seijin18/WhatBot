@@ -15,16 +15,22 @@ Por enquanto o plano é usar o **tier free da OpenRouter** (modelos com sufixo
 de ambiente no momento em que o servidor sobe — **a key nunca fica em texto
 puro no arquivo versionado**.
 
-Defina a variável localmente antes de abrir o Claude Code (não é feito
-automaticamente — rode você mesmo):
+O Claude Code **não** carrega `.env` automaticamente para essa expansão (é um
+feature request ainda em aberto), então a key vive em
+`.claude/settings.local.json` — arquivo local, listado no `.gitignore`,
+carregado automaticamente pelo Claude Code em toda sessão:
 
-```powershell
-# só na sessão atual do terminal
-$env:OPENROUTER_API_KEY = "sua-key-aqui"
-
-# ou, para persistir entre sessões (nível de usuário)
-[Environment]::SetEnvironmentVariable("OPENROUTER_API_KEY", "sua-key-aqui", "User")
+```json
+{
+  "env": {
+    "OPENROUTER_API_KEY": "sua-key-aqui"
+  }
+}
 ```
+
+Não precisa setar variável de ambiente manualmente por sessão/terminal — uma
+vez que o arquivo existe, o Claude Code já resolve `${OPENROUTER_API_KEY}` no
+`.mcp.json` sozinho.
 
 Atenção: o tier free da OpenRouter tem rate limit bem mais apertado que o
 pago — se o Zen começar a travar em rate limit no meio de uma sessão longa,
@@ -110,9 +116,10 @@ Teste com:
 
 ## 5. Checklist rápido
 
-- [ ] Variável de ambiente `OPENROUTER_API_KEY` definida localmente (key free
-      da OpenRouter) — o `.mcp.json` só referencia `${OPENROUTER_API_KEY}`,
-      nunca a key literal
+- [ ] `.claude/settings.local.json` com `OPENROUTER_API_KEY` (key free da
+      OpenRouter) — gitignored, o `.mcp.json` só referencia
+      `${OPENROUTER_API_KEY}`, nunca a key literal
+- [ ] `claude` disponível no PATH (`npm install -g @anthropic-ai/claude-code`)
 - [ ] `.claude/agents/planner.md`, `critic.md`, `implementer.md`,
       `scope-explorer.md` no lugar
 - [ ] `claude mcp list` mostra zen, context-mode e codebase-memory ativos
