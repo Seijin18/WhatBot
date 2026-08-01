@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "zen": {
+      "command": "npx",
+      "args": ["-y", "zen-mcp-server-199bio"],
+      "env": {
+        "OPENROUTER_API_KEY": ""
+      }
+    },
+    "context-mode": {
+      "command": "npx",
+      "args": ["-y", "context-mode"]
+    },
+    "codebase-memory": {
+      "command": "npx",
+      "args": ["-y", "codebase-memory-mcp"]
+    }
+  }
+}
