@@ -38,37 +38,38 @@ esse é o motivo mais provável (ver seção 4).
 
 ### Setup do Zen (`ZEN_MCP_SERVER_HOME`)
 
-O `.mcp.json` chama o Zen (o projeto oficial `BeehiveInnovations/zen-mcp-server`,
-hoje rebatizado **PAL MCP** — "formerly known as Zen MCP") diretamente pelo
-Python de um venv local, sem depender de wrapper npx nenhum. Isso exige
-montar esse venv uma vez:
+O `.mcp.json` chama o Zen — o projeto oficial
+[`BeehiveInnovations/zen-mcp-server`](https://github.com/BeehiveInnovations/zen-mcp-server),
+hoje rebatizado **PAL MCP** ("formerly known as Zen MCP") — diretamente pelo
+Python de um venv local. **Clone o repositório oficial direto via git, sem
+wrapper npm de terceiros** (o `zen-mcp-server-199bio` usado numa versão
+anterior deste setup tinha bugs de instalação reais no Windows — clonar
+direto evita essa camada por completo):
 
 ```powershell
-# 1. bootstrap: deixa o instalador de conveniência clonar o repo e montar o venv
-npx -y zen-mcp-server-199bio
-# Ctrl+C assim que aparecer "Active tools: [...]" ou um erro — o objetivo aqui
-# é só clonar o repo e criar o venv em %USERPROFILE%\.zen-mcp-server
-
-# 2. o requirements.txt do projeto não tem teto de versão pro pacote `mcp`,
-#    então o pip pode puxar uma versão incompatível com o server.py — force
-#    uma versão 1.x, que é a que a API usada no código espera:
+git clone https://github.com/BeehiveInnovations/zen-mcp-server "$env:ZEN_MCP_SERVER_HOME"
 cd $env:ZEN_MCP_SERVER_HOME
-.\venv\Scripts\python -m pip install "mcp<2.0.0"
 
-# 3. o instalador de conveniência espera um `run.py` que esse repo não tem
-#    (ele usa `server.py`) — cria um shim que resolve o caminho de forma
-#    absoluta (o Claude Code chama esse processo com cwd = pasta do projeto,
-#    não a pasta do zen-mcp-server, então um caminho relativo quebra):
-Set-Content -Path "$env:ZEN_MCP_SERVER_HOME\run.py" -Value 'import runpy, os
-runpy.run_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.py"), run_name="__main__")' -Encoding utf8
+python -m venv venv
+.\venv\Scripts\python -m pip install -r requirements.txt
+```
+
+**Versão do pacote `mcp` a fixar:** o `requirements.txt` oficial pede só
+`mcp>=1.0.0`, sem teto — o `pip` puxa a versão mais nova disponível, e a
+série `2.x` do SDK `mcp` quebra o `server.py` desse projeto (erro
+`AttributeError: 'Server' object has no attribute 'list_tools'`, API de
+baixo nível mudou entre as séries 1.x e 2.x). É um gap real do
+`requirements.txt` oficial — force a versão validada:
+
+```powershell
+.\venv\Scripts\python -m pip install "mcp==1.29.0"
 
 cd C:\Projetos\WhatBot
 ```
 
-Isso é uma correção pontual de bugs do instalador `zen-mcp-server-199bio`
-nessa versão, num Windows sem WSL — não deveria ser necessário todo setup,
-mas foi o que resolveu aqui. Se o repo oficial atualizar o `run.py` ou pinar
-a versão do `mcp` corretamente, esses passos deixam de ser necessários.
+O entry point é o `server.py` do próprio repo — sem shim, sem arquivo
+extra, é exatamente o que o `.mcp.json` já referencia
+(`${ZEN_MCP_SERVER_HOME}\server.py`).
 
 Depois, na raiz do projeto:
 
@@ -164,8 +165,10 @@ Teste com:
       referencia `${OPENROUTER_API_KEY}` / `${ZEN_MCP_SERVER_HOME}`, nunca
       valores literais
 - [ ] `claude` disponível no PATH (`npm install -g @anthropic-ai/claude-code`)
-- [ ] `%ZEN_MCP_SERVER_HOME%\venv` montado com `mcp<2.0.0` instalado e
-      `run.py` presente (ver "Setup do Zen" acima)
+- [ ] `%ZEN_MCP_SERVER_HOME%` é um `git clone` do
+      `BeehiveInnovations/zen-mcp-server` oficial, com `venv` montado e
+      `mcp==1.29.0` instalado (ver "Setup do Zen" acima) — nada de wrapper
+      npm de terceiros
 - [ ] `.claude/agents/planner.md`, `critic.md`, `implementer.md`,
       `scope-explorer.md` no lugar
 - [ ] `claude mcp list` mostra zen, context-mode e codebase-memory ativos
