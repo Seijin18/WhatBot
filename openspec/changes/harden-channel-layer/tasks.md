@@ -26,11 +26,11 @@
 
 ## 3. Cobertura do cliente WhatsApp
 
-- [ ] 3.1 `tests/test_evolution_client.py` com `requests.post` mockado: URL,
+- [x] 3.1 `tests/test_evolution_client.py` com `requests.post` mockado: URL,
       headers e corpo corretos
-- [ ] 3.2 `simulated=True` não chama a rede e devolve `{"simulated": True}`
-- [ ] 3.3 `log_outbound` recebe `delivery` `sent` / `skipped` / `failed`
-- [ ] 3.4 Falha de transporte propaga erro tipado
+- [x] 3.2 `simulated=True` não chama a rede e devolve `{"simulated": True}`
+- [x] 3.3 `log_outbound` recebe `delivery` `sent` / `skipped` / `failed`
+- [ ] 3.4 Falha de transporte propaga erro tipado (entra junto com D4)
 
 ## 4. Correções
 
