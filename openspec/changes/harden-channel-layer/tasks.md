@@ -14,15 +14,15 @@
 
 ## 2. Testes end-to-end
 
-- [ ] 2.1 `tests/test_main_e2e.py`: payload cru da Evolution → `main()` →
+- [x] 2.1 `tests/test_main_e2e.py`: payload cru da Evolution → `main()` →
       resposta entregue no cliente WhatsApp
-- [ ] 2.2 Handover: cliente recebe no canal dele e admin é notificado no WhatsApp
-- [ ] 2.3 Cliente em canal não-WhatsApp: resposta no canal do cliente,
+- [x] 2.2 Handover: cliente recebe no canal dele e admin é notificado no WhatsApp
+- [x] 2.3 Cliente em canal não-WhatsApp: resposta no canal do cliente,
       notificação de admin ainda no WhatsApp
-- [ ] 2.4 Comando de admin (`#assumir`) → `handle_admin_message` → `send_admin`
-- [ ] 2.5 Staff respondendo pelo WhatsApp Business (`fromMe`) → fila
+- [x] 2.4 Comando de admin (`#assumir`) → `handle_admin_message` → `send_admin`
+- [x] 2.5 Staff respondendo pelo WhatsApp Business (`fromMe`) → fila
       auto-completada
-- [ ] 2.6 LLM indisponível → `MODEL_UNAVAILABLE_MSG` sai pelo canal correto
+- [x] 2.6 LLM indisponível → `MODEL_UNAVAILABLE_MSG` sai pelo canal correto
 
 ## 3. Cobertura do cliente WhatsApp
 

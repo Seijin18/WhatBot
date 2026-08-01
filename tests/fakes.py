@@ -120,11 +120,11 @@ class FakeLlm:
         self.unavailable = unavailable
         self.calls: list[dict] = []
 
-    def chat(self, system_prompt: str, history, user_message: str, **kwargs):
+    def chat(self, system_prompt: str, recent_history, user_message: str, **kwargs):
         self.calls.append(
             {
                 "system_prompt": system_prompt,
-                "history": history,
+                "recent_history": recent_history,
                 "user_message": user_message,
             }
         )
