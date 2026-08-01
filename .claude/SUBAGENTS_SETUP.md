@@ -27,7 +27,10 @@ a cada terminal):
 ```
 
 Abra um terminal **novo** depois disso (só processos criados depois enxergam
-a mudança).
+a mudança). Se você usa o **app Claude Desktop** (não só um terminal solto),
+isso vale em dobro: o terminal embutido nele é processo filho do próprio app,
+então uma aba nova ali *não* basta — feche o app por completo (confira a
+bandeja do sistema) e abra de novo para ele herdar as variáveis atualizadas.
 
 Atenção: o tier free da OpenRouter tem rate limit bem mais apertado que o
 pago — se o Zen começar a travar em rate limit no meio de uma sessão longa,
@@ -76,6 +79,17 @@ claude mcp list
 
 `context-mode` e `codebase-memory` são pacotes npm padrão, sem esse problema
 — sobem direto com `npx -y context-mode` / `npx -y codebase-memory-mcp`.
+
+### Teste rápido
+
+Com os três conectados (`claude mcp list`), teste o Zen chamando a ferramenta
+`listmodels` — deve listar "OpenRouter ✅ Configured and available" com a
+lista de modelos. Para testar uma chamada de verdade em tier free, use
+`chat` com um modelo `algum-modelo:free` — **os slugs `:free` disponíveis na
+OpenRouter mudam com frequência** (vários que existiam ficaram só pagos),
+então confira a lista atual em openrouter.ai/models (filtro "Free") antes de
+fixar um no seu fluxo; um erro 404 "This model is unavailable for free" é a
+OpenRouter dizendo isso, não falha de conexão do Zen/MCP.
 
 ## 2. Subagentes e comandos
 
