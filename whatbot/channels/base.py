@@ -30,6 +30,21 @@ def normalize_channel(canal: str | None) -> str:
     return normalized or DEFAULT_CHANNEL
 
 
+def validate_channel(canal: str | None) -> str:
+    """Normalize and reject a channel the application does not support.
+
+    Meant for the inbound edge: an unknown channel should stop the request where
+    it arrives, before touching the database or the model, instead of surfacing
+    much later as a routing failure.
+    """
+    normalized = normalize_channel(canal)
+    if normalized not in SUPPORTED_CHANNELS:
+        raise UnknownChannelError(
+            normalized, SUPPORTED_CHANNELS, reason="canal não suportado"
+        )
+    return normalized
+
+
 def channel_label(canal: str | None) -> str:
     """Human-readable channel name for admin messages."""
     return CHANNEL_LABELS.get(normalize_channel(canal), normalize_channel(canal))
@@ -53,14 +68,15 @@ class InboundMessage:
 
     def to_payload(self) -> Dict[str, Any]:
         """Legacy whatbot payload shape, kept for `whatbot.main.main()`."""
+        canal = normalize_channel(self.canal)
         payload: Dict[str, Any] = {
-            "canal": self.canal,
+            "canal": canal,
             "external_id": self.external_id,
             "text": self.text,
             "push_name": self.display_name,
             "message_id": self.message_id,
         }
-        if self.canal == WHATSAPP:
+        if canal == WHATSAPP:
             payload["from_number"] = self.external_id
         return payload
 
@@ -75,10 +91,20 @@ class ChannelError(RuntimeError):
 
 
 class UnknownChannelError(ChannelError):
-    """Raised when no client is registered for a channel."""
+    """Raised for a channel the application cannot handle.
 
-    def __init__(self, canal: str, registered: tuple[str, ...] = ()):
-        detail = f"canal não registrado no roteador (registrados: {', '.join(registered) or 'nenhum'})"
+    Either it is not supported at all (rejected at the inbound edge) or no
+    client is registered for it in the router.
+    """
+
+    def __init__(
+        self,
+        canal: str,
+        known: tuple[str, ...] = (),
+        *,
+        reason: str = "canal não registrado no roteador",
+    ):
+        detail = f"{reason} (conhecidos: {', '.join(known) or 'nenhum'})"
         super().__init__(canal or "?", detail)
 
 

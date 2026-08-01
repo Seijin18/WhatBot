@@ -13,6 +13,7 @@ from .base import (
     UnknownChannelError,
     channel_label,
     normalize_channel,
+    validate_channel,
 )
 from .router import ChannelRouter, send_admin, send_to_contact
 from .whatsapp_evolution import EvolutionApiClient, WhatsAppClient
@@ -35,4 +36,5 @@ __all__ = [
     "normalize_channel",
     "send_admin",
     "send_to_contact",
+    "validate_channel",
 ]

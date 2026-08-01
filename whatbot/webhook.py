@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .channels import WHATSAPP
+from .channels import WHATSAPP, InboundMessage
 
 
 def _extract_text(message: Dict[str, Any]) -> str:
@@ -48,12 +48,21 @@ def parse_outgoing_staff_message(payload: Dict[str, Any]) -> Optional[Dict[str, 
     if not remote_jid or remote_jid.endswith("@g.us"):
         return None
 
-    text = _extract_text(data.get("message") or {})
+    echo = InboundMessage(
+        canal=WHATSAPP,
+        external_id=_normalize_phone(remote_jid),
+        text=_extract_text(data.get("message") or {}) or "[mensagem]",
+        message_id=key.get("id"),
+        is_echo=True,
+        raw=payload,
+    )
 
+    # An echo travels outbound, so it carries `to_number` rather than the
+    # inbound `from_number` that `to_payload()` produces.
     return {
-        "canal": WHATSAPP,
-        "to_number": _normalize_phone(remote_jid),
-        "text": text or "[mensagem]",
+        "canal": echo.canal,
+        "to_number": echo.external_id,
+        "text": echo.text,
         "from_me": True,
         "instance": payload.get("instance"),
         "event": payload.get("event"),
@@ -78,12 +87,17 @@ def parse_evolution_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]
     if not text:
         return None
 
+    message = InboundMessage(
+        canal=WHATSAPP,
+        external_id=_normalize_phone(remote_jid),
+        text=text,
+        display_name=data.get("pushName"),
+        message_id=key.get("id"),
+        raw=payload,
+    )
+
     return {
-        "canal": WHATSAPP,
-        "from_number": _normalize_phone(remote_jid),
-        "text": text,
-        "push_name": data.get("pushName"),
-        "message_id": key.get("id"),
+        **message.to_payload(),
         "instance": payload.get("instance"),
         "event": payload.get("event"),
     }

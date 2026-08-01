@@ -20,10 +20,12 @@ from .config import (
     should_respond_to_customer,
 )
 from .channels import (
-    DEFAULT_CHANNEL,
+    ChannelError,
     ChannelRouter,
     EvolutionApiClient,
+    UnknownChannelError,
     normalize_channel,
+    validate_channel,
 )
 from .db import Database
 from .llm import LlmUnavailableError, create_llm_client
@@ -146,15 +148,20 @@ def run_admin_simulation(
     sim_phone: str | None,
     sim_text: str,
     push_name: str | None = None,
+    canal: str | None = None,
 ) -> Dict[str, Any]:
     admin_phone = normalize_phone(admin_phone)
     sim_phone = normalize_phone(resolve_simulate_phone(sim_phone))
-    logger.info("Simulação cliente %s por admin %s", sim_phone, admin_phone)
+    canal = normalize_channel(canal)
+    logger.info(
+        "Simulação cliente %s (%s) por admin %s", sim_phone, canal, admin_phone
+    )
     result = process_customer_message(
         sim_phone,
         sim_text,
         push_name=f"Simulado por {push_name or admin_phone}",
         simulated=True,
+        canal=canal,
     )
     reply = result.get("model_reply") or result.get("message") or str(result)
     if result.get("handed_to_human"):
@@ -439,8 +446,17 @@ def process_customer_message(
             "intent": intent_result.intent,
             "response_mode": response_mode,
         }
+    except ChannelError as e:
+        logger.exception("Falha de entrega no canal %s: %s", e.canal, e)
+        return {
+            "ok": False,
+            "error": "send_failed",
+            "canal": e.canal,
+            "retryable": e.retryable,
+            "detail": str(e),
+        }
     except Exception as e:
-        logger.exception("Erro ao enviar mensagem via Evolution API: %s", e)
+        logger.exception("Erro ao enviar resposta ao cliente: %s", e)
         return {"ok": False, "error": "send_failed", "detail": str(e)}
 
 
@@ -470,7 +486,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
                 sim = _resolve_admin_simulate(text)
                 if sim:
                     sim_phone, sim_text = sim
-                    return run_admin_simulation(to_phone, sim_phone, sim_text)
+                    return run_admin_simulation(
+                        to_phone, sim_phone, sim_text, canal=outgoing.get("canal")
+                    )
                 return {
                     "ok": True,
                     "ignored": True,
@@ -492,7 +510,17 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         {k: payload.get(k) for k in ("from_number", "text", "push_name")},
     )
 
-    canal = normalize_channel(payload.get("canal"))
+    try:
+        canal = validate_channel(payload.get("canal"))
+    except UnknownChannelError as e:
+        logger.warning("Payload recusado na borda: %s", e)
+        return {
+            "ok": False,
+            "error": "unsupported_channel",
+            "canal": payload.get("canal"),
+            "detail": str(e),
+        }
+
     phone = (
         payload.get("from_number")
         or payload.get("from")
@@ -518,7 +546,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         sim = _resolve_admin_simulate(text)
         if sim:
             sim_phone, sim_text = sim
-            return run_admin_simulation(phone, sim_phone, sim_text, push_name=push_name)
+            return run_admin_simulation(
+                phone, sim_phone, sim_text, push_name=push_name, canal=canal
+            )
 
         try:
             contact = _ensure_admin_contact(phone, push_name)

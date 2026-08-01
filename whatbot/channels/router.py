@@ -98,9 +98,19 @@ class ChannelRouter:
         )
 
 
+def _routes_by_channel(target: Any) -> bool:
+    """Whether `target` is a router rather than a single channel client.
+
+    Detected by capability, not concrete type, so that any object implementing
+    the routing surface keeps `canal` and `human_agent` instead of silently
+    losing them.
+    """
+    return hasattr(target, "send_admin_text")
+
+
 def send_admin(target: Any, to: str, text: str, *, source: str = "admin") -> Dict[str, Any]:
     """Send to an admin, accepting either a router or a bare channel client."""
-    if hasattr(target, "send_admin_text"):
+    if _routes_by_channel(target):
         return target.send_admin_text(to, text, source=source)
     return target.send_text(to, text, source=source)
 
@@ -117,7 +127,7 @@ def send_to_contact(
     human_agent: bool = False,
 ) -> Dict[str, Any]:
     """Send to a customer, accepting either a router or a bare channel client."""
-    if isinstance(target, ChannelRouter):
+    if _routes_by_channel(target):
         return target.send_text(
             to,
             text,

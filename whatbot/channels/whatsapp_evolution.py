@@ -9,7 +9,15 @@ import requests
 
 from ..config import EVOLUTION_API_BASE_URL
 from ..message_log import log_outbound
-from .base import WHATSAPP
+from .base import WHATSAPP, ChannelError
+
+# Transport-level problems worth retrying; an HTTP error means the API answered
+# and rejected the request, so repeating it changes nothing.
+_RETRYABLE = (requests.ConnectionError, requests.Timeout)
+
+
+def _is_retryable(exc: requests.RequestException) -> bool:
+    return isinstance(exc, _RETRYABLE)
 
 
 class EvolutionApiClient:
@@ -25,7 +33,7 @@ class EvolutionApiClient:
 
     def send_text(
         self,
-        to_phone: str,
+        to: str,
         text: str,
         *,
         source: str = "bot",
@@ -33,6 +41,7 @@ class EvolutionApiClient:
         simulated: bool = False,
         human_agent: bool = False,  # noqa: ARG002 - WhatsApp has no messaging window
     ) -> Dict[str, Any]:
+        to_phone = to
         url = f"{self.base_url}/message/sendText/{self.instance_name}"
         headers = {
             "apikey": self.api_key,
@@ -81,7 +90,9 @@ class EvolutionApiClient:
                 error=str(exc),
             )
             self._logger.exception("Erro enviando mensagem via Evolution API: %s", exc)
-            raise
+            raise ChannelError(
+                WHATSAPP, str(exc), retryable=_is_retryable(exc)
+            ) from exc
 
 
 # Backward-compatible alias for the rest of the application.

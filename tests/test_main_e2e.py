@@ -230,6 +230,56 @@ class TestStaffOutgoing(MainE2ETestCase):
         self.assert_nothing_sent_on(self.wa)
 
 
+class TestUnsupportedChannel(MainE2ETestCase):
+    """D2 — a channel the app cannot handle stops at the edge."""
+
+    def test_payload_with_unknown_channel_is_refused(self):
+        result = main_mod.main(
+            {"canal": "telegram", "from_number": CUSTOMER_PHONE, "text": "oi"}
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "unsupported_channel")
+        self.assertIn("telegram", result["detail"])
+
+    def test_nothing_is_touched_when_the_channel_is_refused(self):
+        main_mod.main(
+            {"canal": "telegram", "from_number": CUSTOMER_PHONE, "text": "oi"}
+        )
+
+        self.assertEqual(self.db.contacts, {})
+        self.assertEqual(self.llm.calls, [])
+        self.assert_nothing_sent_on(self.wa)
+        self.assert_nothing_sent_on(self.ig)
+
+
+class TestAdminSimulation(MainE2ETestCase):
+    """D1 — a simulation must resolve on the simulated contact's channel."""
+
+    def test_simulation_keeps_the_channel(self):
+        result = main_mod.run_admin_simulation(
+            ADMIN_PHONE, IGSID, "Quais modalidades?", canal=INSTAGRAM
+        )
+
+        self.assertEqual(result["simulated_as"], IGSID)
+        # The simulated customer is never really messaged...
+        self.assert_nothing_sent_on(self.ig)
+        # ...but the admin gets the transcript back on the admin channel.
+        self.assertEqual(len(self.wa.sent), 1)
+        self.assertEqual(self.wa.sent[0]["to"], ADMIN_PHONE)
+        self.assertEqual(self.wa.sent[0]["source"], "simulation")
+
+    def test_simulated_handover_resolves_on_the_simulated_channel(self):
+        """Without the channel flowing through, this would hit the router as
+        an Instagram id routed to the WhatsApp client."""
+        result = main_mod.run_admin_simulation(
+            ADMIN_PHONE, IGSID, "quero falar com a secretaria", canal=INSTAGRAM
+        )
+
+        self.assertTrue(result["handed_to_human"])
+        self.assert_nothing_sent_on(self.ig)
+
+
 class TestQueueMaintenance(MainE2ETestCase):
     def test_check_queue_runs_without_arguments(self):
         """Production calls `check_queue()` bare from a scheduled Windmill job."""

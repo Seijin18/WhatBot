@@ -30,29 +30,29 @@
       headers e corpo corretos
 - [x] 3.2 `simulated=True` não chama a rede e devolve `{"simulated": True}`
 - [x] 3.3 `log_outbound` recebe `delivery` `sent` / `skipped` / `failed`
-- [ ] 3.4 Falha de transporte propaga erro tipado (entra junto com D4)
+- [x] 3.4 Falha de transporte propaga erro tipado (entra junto com D4)
 
 ## 4. Correções
 
-- [ ] 4.1 D1 — propagar `canal` de `run_admin_simulation` para
+- [x] 4.1 D1 — propagar `canal` de `run_admin_simulation` para
       `process_customer_message`
-- [ ] 4.2 D2 — validar canal contra `SUPPORTED_CHANNELS` na borda de entrada
-- [ ] 4.3 D3 — renomear o primeiro parâmetro de `EvolutionApiClient.send_text`
+- [x] 4.2 D2 — validar canal contra `SUPPORTED_CHANNELS` na borda de entrada
+- [x] 4.3 D3 — renomear o primeiro parâmetro de `EvolutionApiClient.send_text`
       para `to`, alinhando ao protocolo
-- [ ] 4.4 D4 — embrulhar falha de transporte em `ChannelError(retryable=...)` e
+- [x] 4.4 D4 — embrulhar falha de transporte em `ChannelError(retryable=...)` e
       ajustar o tratamento em `main.py`, com log agnóstico de canal
-- [ ] 4.5 D5 — `send_to_contact` passa a despachar por `hasattr`, como
+- [x] 4.5 D5 — `send_to_contact` passa a despachar por `hasattr`, como
       `send_admin`
-- [ ] 4.6 D6 — `webhook.py` constrói `InboundMessage` e emite `.to_payload()`;
+- [x] 4.6 D6 — `webhook.py` constrói `InboundMessage` e emite `.to_payload()`;
       `to_payload()` normaliza o canal antes de comparar
-- [ ] 4.7 D7 — remover import morto de `DEFAULT_CHANNEL` em `main.py`
+- [x] 4.7 D7 — remover import morto de `DEFAULT_CHANNEL` em `main.py`
 
 ## 5. Fechamento
 
-- [ ] 5.1 Suíte completa verde, com os 84 testes anteriores sem alteração de
+- [x] 5.1 Suíte completa verde, com os 84 testes anteriores sem alteração de
       asserção
 - [ ] 5.2 Verificar que cada teste novo falha se a correção correspondente for
       revertida
-- [ ] 5.3 Confirmar por busca que não há envio direto por cliente concreto
+- [x] 5.3 Confirmar por busca que não há envio direto por cliente concreto
 - [ ] 5.4 Smoke com Docker: `make chat-test` produz a mesma resposta que em
       `db9db6a` (critério de aceite da Fase 1 que ficou em aberto)
