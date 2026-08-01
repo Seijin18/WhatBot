@@ -53,9 +53,11 @@ cd $env:ZEN_MCP_SERVER_HOME
 .\venv\Scripts\python -m pip install "mcp<2.0.0"
 
 # 3. o instalador de conveniência espera um `run.py` que esse repo não tem
-#    (ele usa `server.py`) — cria um shim de uma linha:
-Set-Content -Path "$env:ZEN_MCP_SERVER_HOME\run.py" -Value 'import runpy
-runpy.run_path("server.py", run_name="__main__")' -Encoding utf8
+#    (ele usa `server.py`) — cria um shim que resolve o caminho de forma
+#    absoluta (o Claude Code chama esse processo com cwd = pasta do projeto,
+#    não a pasta do zen-mcp-server, então um caminho relativo quebra):
+Set-Content -Path "$env:ZEN_MCP_SERVER_HOME\run.py" -Value 'import runpy, os
+runpy.run_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.py"), run_name="__main__")' -Encoding utf8
 
 cd C:\Projetos\WhatBot
 ```
