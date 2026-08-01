@@ -13,48 +13,7 @@ from whatbot.channels import (
     send_to_contact,
 )
 
-
-class FakeClient:
-    """Minimal channel client that records what it was asked to send."""
-
-    def __init__(self, canal: str):
-        self.canal = canal
-        self.sent: list[dict] = []
-
-    def send_text(
-        self,
-        to,
-        text,
-        *,
-        source="bot",
-        contact_id=None,
-        simulated=False,
-        human_agent=False,
-    ):
-        self.sent.append(
-            {
-                "to": to,
-                "text": text,
-                "source": source,
-                "contact_id": contact_id,
-                "simulated": simulated,
-                "human_agent": human_agent,
-            }
-        )
-        return {"ok": True, "canal": self.canal}
-
-
-class LegacyClient:
-    """Client without the `human_agent` kwarg, as third-party/older code may be."""
-
-    canal = WHATSAPP
-
-    def __init__(self):
-        self.sent: list[tuple] = []
-
-    def send_text(self, to, text, *, source="bot", contact_id=None, simulated=False):
-        self.sent.append((to, text, source))
-        return {"ok": True}
+from fakes import FakeClient, LegacyClient
 
 
 class TestChannelNames(unittest.TestCase):

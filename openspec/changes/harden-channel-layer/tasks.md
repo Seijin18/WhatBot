@@ -2,15 +2,15 @@
 
 ## 1. Harness de teste
 
-- [ ] 1.1 Criar `tests/fakes.py` com `FakeDatabase` em memória cobrindo a
+- [x] 1.1 Criar `tests/fakes.py` com `FakeDatabase` em memória cobrindo a
       superfície pública de `whatbot.db.Database` usada por `main`, `queue`,
       `admin` e `domain`, devolvendo `Contact` / `WaitingContact` /
       `MessageRecord` reais
-- [ ] 1.2 Mover `FakeClient` e `LegacyClient` de `tests/test_channel_router.py`
+- [x] 1.2 Mover `FakeClient` e `LegacyClient` de `tests/test_channel_router.py`
       para `tests/fakes.py` e importá-los de volta, sem alterar nenhuma asserção
       daquele arquivo
-- [ ] 1.3 Adicionar `FakeLlm` (resposta fixa e modo indisponível) e um helper de
-      injeção dos globais `_db` / `_router` / `_llm` de `whatbot.main`
+- [x] 1.3 Adicionar `FakeLlm` (resposta fixa e modo indisponível) e `DuckRouter`
+      (roteia por canal sem ser a classe concreta, para pegar despacho por tipo)
 
 ## 2. Testes end-to-end
 
