@@ -51,7 +51,7 @@
 
 - [x] 5.1 Suíte completa verde, com os 84 testes anteriores sem alteração de
       asserção
-- [ ] 5.2 Verificar que cada teste novo falha se a correção correspondente for
+- [x] 5.2 Verificar que cada teste novo falha se a correção correspondente for
       revertida
 - [x] 5.3 Confirmar por busca que não há envio direto por cliente concreto
 - [ ] 5.4 Smoke com Docker: `make chat-test` produz a mesma resposta que em

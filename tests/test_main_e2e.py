@@ -254,9 +254,31 @@ class TestUnsupportedChannel(MainE2ETestCase):
 
 
 class TestAdminSimulation(MainE2ETestCase):
-    """D1 — a simulation must resolve on the simulated contact's channel."""
+    """D1 — a simulation must carry the simulated contact's channel.
 
-    def test_simulation_keeps_the_channel(self):
+    A simulation never actually messages the customer, so the defect has no
+    visible effect today; it is plumbing that only bites once a non-WhatsApp
+    contact can be simulated. These tests pin the contract at the seam where
+    the channel is handed over.
+    """
+
+    def test_simulation_forwards_the_channel(self):
+        with patch.object(main_mod, "process_customer_message") as process:
+            process.return_value = {"ok": True, "model_reply": "resposta"}
+            main_mod.run_admin_simulation(
+                ADMIN_PHONE, IGSID, "Quais modalidades?", canal=INSTAGRAM
+            )
+
+        self.assertEqual(process.call_args.kwargs["canal"], INSTAGRAM)
+
+    def test_simulation_without_a_channel_defaults_to_whatsapp(self):
+        with patch.object(main_mod, "process_customer_message") as process:
+            process.return_value = {"ok": True, "model_reply": "resposta"}
+            main_mod.run_admin_simulation(ADMIN_PHONE, CUSTOMER_PHONE, "oi")
+
+        self.assertEqual(process.call_args.kwargs["canal"], WHATSAPP)
+
+    def test_simulation_reports_back_on_the_admin_channel(self):
         result = main_mod.run_admin_simulation(
             ADMIN_PHONE, IGSID, "Quais modalidades?", canal=INSTAGRAM
         )
@@ -268,16 +290,6 @@ class TestAdminSimulation(MainE2ETestCase):
         self.assertEqual(len(self.wa.sent), 1)
         self.assertEqual(self.wa.sent[0]["to"], ADMIN_PHONE)
         self.assertEqual(self.wa.sent[0]["source"], "simulation")
-
-    def test_simulated_handover_resolves_on_the_simulated_channel(self):
-        """Without the channel flowing through, this would hit the router as
-        an Instagram id routed to the WhatsApp client."""
-        result = main_mod.run_admin_simulation(
-            ADMIN_PHONE, IGSID, "quero falar com a secretaria", canal=INSTAGRAM
-        )
-
-        self.assertTrue(result["handed_to_human"])
-        self.assert_nothing_sent_on(self.ig)
 
 
 class TestQueueMaintenance(MainE2ETestCase):
