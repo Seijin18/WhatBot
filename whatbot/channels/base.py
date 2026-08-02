@@ -82,12 +82,27 @@ class InboundMessage:
 
 
 class ChannelError(RuntimeError):
-    """Raised when a channel cannot deliver a message."""
+    """Raised when a channel cannot deliver a message.
 
-    def __init__(self, canal: str, message: str, *, retryable: bool = False):
+    `cause` is an optional, channel-defined identifier for *why* delivery was
+    refused (e.g. `"window_expired"`, `"missing_human_agent_permission"`,
+    `"rate_limited"`), so callers can react to specific failure modes without
+    parsing the message string. `None` means the failure has no such
+    identified cause (e.g. a generic transport failure).
+    """
+
+    def __init__(
+        self,
+        canal: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        cause: str | None = None,
+    ):
         super().__init__(f"[{canal}] {message}")
         self.canal = canal
         self.retryable = retryable
+        self.cause = cause
 
 
 class UnknownChannelError(ChannelError):

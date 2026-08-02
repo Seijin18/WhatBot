@@ -21,6 +21,7 @@ from whatbot.channels import (
     send_to_contact,
     validate_channel,
 )
+from whatbot.channels.instagram import InstagramClient
 from whatbot.channels.whatsapp_evolution import EvolutionApiClient
 from whatbot.webhook import parse_evolution_payload
 
@@ -162,6 +163,37 @@ class TestClientProtocolAlignment(unittest.TestCase):
                 self.client.send_text(PHONE, "oi")
 
         self.assertFalse(ctx.exception.retryable)
+
+
+class TestInstagramClientProtocolAlignment(unittest.TestCase):
+    """The Instagram client must satisfy `ChannelClient` the same way WhatsApp's does."""
+
+    def setUp(self):
+        self.client = InstagramClient(
+            access_token="ig-token", account_id="ig-account", base_url="https://graph.instagram.com"
+        )
+
+    def test_client_satisfies_the_channel_client_protocol(self):
+        from whatbot.channels import ChannelClient
+
+        self.assertIsInstance(self.client, ChannelClient)
+
+    def test_declares_the_instagram_channel(self):
+        self.assertEqual(self.client.canal, INSTAGRAM)
+
+    def test_recipient_can_be_passed_by_keyword(self):
+        from unittest.mock import MagicMock, patch
+
+        response = MagicMock(ok=True)
+        response.json.return_value = {}
+        with patch(
+            "whatbot.channels.instagram.requests.post", return_value=response
+        ), patch("whatbot.channels.instagram.log_outbound"):
+            self.client.send_text(to=IGSID, text="oi")
+
+    def test_router_accepts_the_instagram_client_too(self):
+        router = ChannelRouter([self.client])
+        self.assertIs(router.client_for(INSTAGRAM), self.client)
 
 
 if __name__ == "__main__":
