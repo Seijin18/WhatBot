@@ -16,7 +16,12 @@
 
 ## 1. Integração ponta a ponta
 
-- [ ] 1.1 Registrar `whatbot/channels/instagram.py` no `ChannelRouter`
+- [ ] 1.1 Registrar `whatbot/channels/instagram.py` no `ChannelRouter` —
+      montar o `InstagramClient` com
+      `last_inbound_lookup=instagram_last_inbound_lookup(_db)` (helper de
+      `whatbot/channels/instagram.py`), nunca `_db.get_last_inbound_at`
+      direto: sem `canal=INSTAGRAM` fixado, o client fica fail-closed 100% do
+      tempo (ver `instagram-messaging-window` Importante 5)
 - [ ] 1.2 Conectar a conta real e assinar o webhook (depende de
       `instagram-webhook-exposure` e `instagram-ingestion-service` prontos)
 - [ ] 1.3 `TEST_IGSIDS` populado com as contas de teste reais, usando o
