@@ -58,3 +58,13 @@
       `db9db6a` (critério de aceite da Fase 1 que ficou em aberto)
       — BLOQUEADO: daemon do Docker fora do ar nesta máquina. Único item do
       change que não pôde ser verificado; depende de ambiente, não de código.
+
+## Nota de arquivamento (2026-08-01)
+
+Change arquivado com 5.4 em aberto, aceito como risco residual de ambiente:
+todas as demais tarefas (1.1–5.3) foram verificadas linha a linha contra o
+código antes do arquivamento, e o delta de `specs/channels/spec.md` já foi
+sincronizado em `openspec/specs/channels/spec.md`. 5.4 deve ser executado
+manualmente (`make chat-test`) na primeira vez que o Docker estiver disponível
+nesta máquina; se a resposta divergir de `db9db6a`, abrir um change de
+correção pontual — não reabrir este change arquivado.
