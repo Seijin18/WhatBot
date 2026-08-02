@@ -2,21 +2,28 @@
 
 Uses the "Instagram API with Instagram Login" (host `graph.instagram.com`),
 not the Facebook Login variant — see `design.md` in the
-`instagram-channel-client` change for why. This client implements the
-mechanism for signaling typed failures (`ChannelError` with a `cause`); the
-policy of *when* a send is outside the 24h messaging window is added later by
-`instagram-messaging-window`, which edits this file.
+`instagram-channel-client` change for why.
+
+This client implements both the *mechanism* for signaling typed failures
+(`ChannelError` with a `cause`) and the *policy* of when a send is outside the
+messaging window Meta imposes on Instagram Direct (`instagram-messaging-window`):
+`send_text` checks `last_inbound_at` — resolved via an injected accessor, not a
+direct `whatbot/db.py` dependency, see `design.md` — before dispatching
+anything. Domain code (`whatbot/main.py`, `whatbot/domain.py`) never has to
+know this policy exists; it only reacts to `ChannelError`, same as any other
+channel failure.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List
 import logging
 
 import requests
 
 from ..message_log import log_outbound
-from .base import INSTAGRAM, ChannelError
+from .base import INSTAGRAM, ChannelError, messaging_window
 
 DEFAULT_BASE_URL = "https://graph.instagram.com"
 API_VERSION = "v23.0"
@@ -39,6 +46,15 @@ _RATE_LIMIT_CODE = 613
 CAUSE_WINDOW_EXPIRED = "window_expired"
 CAUSE_MISSING_HUMAN_AGENT_PERMISSION = "missing_human_agent_permission"
 CAUSE_RATE_LIMITED = "rate_limited"
+
+# `(standard_window, human_agent_window)` — single source of truth shared with
+# `whatbot/queue.py`, see `whatbot/channels/base.py`.
+WINDOW_STANDARD, WINDOW_HUMAN_AGENT = messaging_window(INSTAGRAM)
+
+_WINDOW_EXPIRED_MESSAGE = (
+    "Janela de mensageria do Instagram expirada para este contato "
+    "(sem last_inbound_at dentro de 24h, ou de 7 dias com atendimento humano)."
+)
 
 
 def _is_retryable(exc: requests.RequestException) -> bool:
@@ -104,14 +120,64 @@ class InstagramClient:
         access_token: str,
         account_id: str | None = None,
         base_url: str | None = None,
+        *,
+        last_inbound_lookup: Callable[[str], "datetime | None"] | None = None,
+        clock: Callable[[], datetime] | None = None,
     ):
         self.access_token = access_token
         self.account_id = account_id
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self._logger = logging.getLogger("whatbot.instagram_api")
+        # Small accessor injected by the caller (e.g. `whatbot/main.py`), never
+        # a direct `whatbot/db.py` dependency — keeps this client a pure HTTP
+        # layer. `None` disables the window check entirely (e.g. tests that
+        # don't care about the policy) instead of assuming a default.
+        self._last_inbound_lookup = last_inbound_lookup
+        # Injectable clock so window tests don't depend on wall-clock time.
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def _messages_url(self) -> str:
         return f"{self.base_url}/{API_VERSION}/me/messages"
+
+    def _check_messaging_window(
+        self, to: str, *, human_agent: bool, source: str, contact_id: int | None
+    ) -> None:
+        """Raise `ChannelError(cause=CAUSE_WINDOW_EXPIRED)` if `to` is outside the window.
+
+        No-op when no `last_inbound_lookup` was injected (see `__init__`).
+        """
+        if self._last_inbound_lookup is None:
+            return
+
+        last_inbound_at = self._last_inbound_lookup(to)
+        blocked = last_inbound_at is None
+        if not blocked:
+            elapsed = self._clock() - last_inbound_at
+            if elapsed <= WINDOW_STANDARD:
+                return
+            if elapsed <= WINDOW_HUMAN_AGENT and human_agent:
+                return
+            blocked = True
+
+        self._logger.warning(
+            "Envio recusado: janela de mensageria do Instagram expirada para %s", to
+        )
+        log_outbound(
+            to,
+            _WINDOW_EXPIRED_MESSAGE,
+            canal=INSTAGRAM,
+            source=source,
+            contact_id=contact_id,
+            delivery="failed",
+            error=_WINDOW_EXPIRED_MESSAGE,
+            cause=CAUSE_WINDOW_EXPIRED,
+        )
+        raise ChannelError(
+            INSTAGRAM,
+            _WINDOW_EXPIRED_MESSAGE,
+            retryable=False,
+            cause=CAUSE_WINDOW_EXPIRED,
+        )
 
     def _build_payload(self, to: str, text: str, *, human_agent: bool) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -215,6 +281,10 @@ class InstagramClient:
                 delivery="skipped",
             )
             return {"simulated": True}
+
+        self._check_messaging_window(
+            to, human_agent=human_agent, source=source, contact_id=contact_id
+        )
 
         blocks = split_text(text)
         results = []

@@ -63,6 +63,7 @@ class WaitingContact:
     canal: str = WHATSAPP
     external_id: str | None = None
     handle: str | None = None
+    last_inbound_at: datetime | None = None
 
     @property
     def label(self) -> str:
@@ -350,6 +351,57 @@ class Database:
             self._logger.exception("Erro atualizando ia_ativa: %s", e)
             raise
 
+    def update_contact_last_inbound(
+        self, contact_id: int, when: datetime | None = None
+    ) -> None:
+        """Record `when` (default: now) as the contact's last inbound message.
+
+        Feeds the Instagram messaging-window check (see
+        `whatbot/channels/instagram.py`) — called for every inbound customer
+        message, on every channel, from `whatbot/main.py`.
+        """
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    if when is None:
+                        cur.execute(
+                            "UPDATE contatos SET last_inbound_at = now() WHERE id = %s",
+                            (contact_id,),
+                        )
+                    else:
+                        cur.execute(
+                            "UPDATE contatos SET last_inbound_at = %s WHERE id = %s",
+                            (when, contact_id),
+                        )
+        except Exception as e:
+            self._logger.exception("Erro atualizando last_inbound_at: %s", e)
+            raise
+
+    def get_last_inbound_at(
+        self, external_id: str, canal: str | None = None
+    ) -> datetime | None:
+        """Look up a contact's `last_inbound_at` by its channel-scoped identity.
+
+        Small read accessor meant to be injected into channel clients (e.g.
+        `InstagramClient(last_inbound_lookup=...)`), which must not depend on
+        `whatbot/db.py` directly (see `openspec/project.md`, "Camadas").
+        """
+        canal = normalize_channel(canal)
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT last_inbound_at FROM contatos WHERE canal = %s AND external_id = %s",
+                        (canal, external_id),
+                    )
+                    row = cur.fetchone()
+                    return row[0] if row else None
+        except Exception as e:
+            self._logger.exception("Erro buscando last_inbound_at: %s", e)
+            raise
+
     def enroll_handover(
         self,
         contact_id: int,
@@ -388,7 +440,7 @@ class Database:
         return """
             SELECT id, phone, push_name, handover_at, handover_motivo,
                    EXTRACT(EPOCH FROM (now() - handover_at)) / 60 AS minutes_waiting,
-                   prioridade, assumido_por, canal, external_id, handle
+                   prioridade, assumido_por, canal, external_id, handle, last_inbound_at
             FROM contatos
             WHERE handover_at IS NOT NULL AND atendido_at IS NULL
         """
@@ -406,6 +458,7 @@ class Database:
             canal=r[8] if len(r) > 8 and r[8] else WHATSAPP,
             external_id=r[9] if len(r) > 9 else None,
             handle=r[10] if len(r) > 10 else None,
+            last_inbound_at=r[11] if len(r) > 11 else None,
         )
 
     def get_waiting_contacts(self) -> List[WaitingContact]:

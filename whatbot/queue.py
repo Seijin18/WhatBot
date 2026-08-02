@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import List
 from zoneinfo import ZoneInfo
 
@@ -18,7 +18,7 @@ from .config import (
     NOTIFY_LONG_WAIT_MINUTES,
     NOTIFY_QUEUE_BATCH,
 )
-from .channels import channel_label, send_admin
+from .channels import channel_label, messaging_window, send_admin
 from .db import Database, WaitingContact, resolve_label
 from .priority import prioridade_label
 
@@ -83,6 +83,38 @@ def format_waiting_list(
     return "\n".join(lines)
 
 
+def window_deadline_note(contact: WaitingContact, now: datetime | None = None) -> str | None:
+    """Portuguese note on the contact's messaging-window response deadline.
+
+    `None` when the contact's channel imposes no messaging window (e.g.
+    WhatsApp) or `last_inbound_at` is unknown — nothing to add to the
+    notification in that case (see `openspec/changes/instagram-messaging-window`,
+    Requirement "Notificação de fila informa prazo de resposta").
+    """
+    window = messaging_window(contact.canal)
+    if not window or contact.last_inbound_at is None:
+        return None
+
+    standard, human_agent = window
+    now = now or datetime.now(timezone.utc)
+    elapsed = now - contact.last_inbound_at
+    tz = ZoneInfo(get_timezone())
+
+    def _fmt(dt: datetime) -> str:
+        return dt.astimezone(tz).strftime("%d/%m %H:%M")
+
+    if elapsed <= standard:
+        deadline = contact.last_inbound_at + standard
+        return f"responder em até 24h (janela livre até {_fmt(deadline)})"
+    if elapsed <= human_agent:
+        deadline = contact.last_inbound_at + human_agent
+        return (
+            "janela de 24h encerrada — só via atendimento humano, até "
+            f"{_fmt(deadline)} (7 dias)"
+        )
+    return "janela de mensageria encerrada (fora de 7 dias)"
+
+
 def notify_admin(
     router,
     message: str,
@@ -129,6 +161,9 @@ def process_new_handover(
             f"🆕 *Novo na fila* — {contact.push_name or 'Sem nome'} ({identity} · {canal})\n"
             f"Prioridade: {prio} | Total na fila: {len(waiting)}"
         )
+        deadline_note = window_deadline_note(contact)
+        if deadline_note:
+            msg += f"\nPrazo de resposta: {deadline_note}"
         if notify_admin(router, msg):
             result["immediate"] = True
 

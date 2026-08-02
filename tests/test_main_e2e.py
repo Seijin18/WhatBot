@@ -14,7 +14,8 @@ import unittest
 from unittest.mock import patch
 
 from whatbot import main as main_mod
-from whatbot.channels import INSTAGRAM, WHATSAPP, ChannelRouter
+from whatbot.channels import INSTAGRAM, WHATSAPP, ChannelError, ChannelRouter
+from whatbot.channels.instagram import CAUSE_WINDOW_EXPIRED
 
 from fakes import FakeClient, FakeDatabase, FakeLlm
 
@@ -392,6 +393,29 @@ class TestModelUnavailable(MainE2ETestCase):
         else:
             self.assertEqual(self.ig.sent[0]["source"], "system")
             self.assertIn(main_mod.MODEL_UNAVAILABLE_MSG, self.texts_sent_on(self.ig))
+        self.assert_nothing_sent_on(self.wa)
+
+
+class TestMessagingWindowBlocksAutomaticSend(MainE2ETestCase):
+    """`instagram-messaging-window`: a send refused for being outside the
+    messaging window must never surface as an error to the customer — the
+    channel failure is absorbed the same way any other `ChannelError` is
+    (see `whatbot/main.py::process_customer_message`)."""
+
+    def test_automatic_reply_blocked_outside_the_window_reaches_no_one(self):
+        self.ig.raise_error = ChannelError(
+            INSTAGRAM, "janela expirada", cause=CAUSE_WINDOW_EXPIRED
+        )
+
+        result = main_mod.process_customer_message(
+            IGSID, "Vocês têm natação infantil?", canal=INSTAGRAM
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "send_failed")
+        self.assertEqual(result["canal"], INSTAGRAM)
+        # Nothing was delivered — not the reply, not an error message either.
+        self.assert_nothing_sent_on(self.ig)
         self.assert_nothing_sent_on(self.wa)
 
 

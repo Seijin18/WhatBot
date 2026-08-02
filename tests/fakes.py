@@ -30,6 +30,10 @@ class FakeClient:
     def __init__(self, canal: str):
         self.canal = canal
         self.sent: list[dict] = []
+        # When set, `send_text` raises this instead of recording the send —
+        # lets tests simulate a channel-level refusal (e.g. `ChannelError`
+        # with `cause="window_expired"`) without a real client.
+        self.raise_error: Exception | None = None
 
     def send_text(
         self,
@@ -41,6 +45,8 @@ class FakeClient:
         simulated=False,
         human_agent=False,
     ):
+        if self.raise_error is not None:
+            raise self.raise_error
         self.sent.append(
             {
                 "to": to,
@@ -199,6 +205,7 @@ class FakeDatabase:
             canal=row["canal"],
             external_id=row["external_id"],
             handle=row["handle"],
+            last_inbound_at=row.get("last_inbound_at"),
         )
 
     def _is_waiting_row(self, row: dict) -> bool:
@@ -253,6 +260,7 @@ class FakeDatabase:
             "canal": canal,
             "external_id": external_id,
             "handle": handle,
+            "last_inbound_at": None,
         }
         self.contacts[contact_id] = row
         return self._row_to_contact(row)
@@ -269,6 +277,17 @@ class FakeDatabase:
 
     def update_contact_ia_active(self, contact_id: int, ia_ativa: bool) -> None:
         self.contacts[contact_id]["ia_ativa"] = ia_ativa
+
+    def update_contact_last_inbound(
+        self, contact_id: int, when: datetime | None = None
+    ) -> None:
+        self.contacts[contact_id]["last_inbound_at"] = when or _now()
+
+    def get_last_inbound_at(
+        self, external_id: str, canal: str | None = None
+    ) -> Optional[datetime]:
+        row = self._find_by_identity(external_id, canal)
+        return row["last_inbound_at"] if row else None
 
     # -- handover / queue ------------------------------------------------
 

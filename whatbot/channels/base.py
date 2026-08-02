@@ -7,6 +7,7 @@ in the package (config, db, main) without creating import cycles.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, Dict, Protocol, runtime_checkable
 
 WHATSAPP = "whatsapp"
@@ -20,6 +21,26 @@ CHANNEL_LABELS = {
     WHATSAPP: "WhatsApp",
     INSTAGRAM: "Instagram",
 }
+
+# Channels whose provider imposes a messaging window (Meta policy, on
+# Instagram Direct): `(standard_window, human_agent_window)`. `standard_window`
+# allows any send; between `standard_window` and `human_agent_window`, only
+# sends flagged `human_agent=True` are allowed; past `human_agent_window`,
+# nothing goes out. Channels absent from this map (WhatsApp) have no window.
+# Single source of truth, shared by `whatbot/channels/instagram.py` (enforces
+# it) and `whatbot/queue.py` (surfaces the deadline in admin notifications) —
+# see `openspec/changes/instagram-messaging-window/design.md`.
+MESSAGING_WINDOWS: dict[str, tuple[timedelta, timedelta]] = {
+    INSTAGRAM: (timedelta(hours=24), timedelta(days=7)),
+}
+
+
+def messaging_window(canal: str | None) -> tuple[timedelta, timedelta] | None:
+    """Return `(standard_window, human_agent_window)` for `canal`, or `None`.
+
+    `None` means the channel imposes no messaging window (e.g. WhatsApp).
+    """
+    return MESSAGING_WINDOWS.get(normalize_channel(canal))
 
 
 def normalize_channel(canal: str | None) -> str:
