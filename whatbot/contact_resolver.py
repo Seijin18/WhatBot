@@ -6,7 +6,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-from .channels import WHATSAPP
+from .channels import WHATSAPP, channel_label
 from .db import WaitingContact, resolve_label
 from .queue import normalize_phone
 
@@ -94,7 +94,8 @@ def format_disambiguation(matches: list[ContactMatch], acao: str) -> str:
         # `Contact.label`/`WaitingContact.label` (whatbot/db.py:resolve_label),
         # minus the name itself since it is already displayed separately.
         identity = resolve_label(None, c.handle, c.external_id or c.phone) or "?"
-        lines.append(f"*{idx}.* {name} — {identity} ({c.minutes_waiting} min)")
+        canal = channel_label(c.canal)
+        lines.append(f"*{idx}.* {name} — {identity} · {canal} ({c.minutes_waiting} min)")
     lines.append("")
     lines.append(f"Responda com o *número* (1-{min(len(matches), 5)}) ou o *telefone* completo.")
     return "\n".join(lines)

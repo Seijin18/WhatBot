@@ -15,7 +15,7 @@ from .contact_resolver import (
     waiting_to_dict,
 )
 from .db import Database, WaitingContact
-from .channels import WHATSAPP, send_admin
+from .channels import WHATSAPP, channel_label, send_admin
 from .queue import (
     build_daily_summary,
     format_waiting_list,
@@ -213,7 +213,8 @@ def _resolve_reactivate(
         for idx, r in enumerate(rows[:5], start=1):
             name = r["push_name"] or "Sem nome"
             fila = " (na fila)" if r["in_queue"] else ""
-            lines.append(f"*{idx}.* {name} — {r['label']}{fila}")
+            canal = channel_label(r["canal"])
+            lines.append(f"*{idx}.* {name} — {r['label']} · {canal}{fila}")
         lines.append("\nResponda com *1*, *2*... ou o telefone.")
         return None, "\n".join(lines)
 

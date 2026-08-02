@@ -18,7 +18,7 @@ from .config import (
     NOTIFY_LONG_WAIT_MINUTES,
     NOTIFY_QUEUE_BATCH,
 )
-from .channels import send_admin
+from .channels import channel_label, send_admin
 from .db import Database, WaitingContact, resolve_label
 from .priority import prioridade_label
 
@@ -64,8 +64,9 @@ def format_waiting_list(
         # `WaitingContact.label` (whatbot/db.py:resolve_label), minus the
         # name itself since it is already shown separately here.
         identity = resolve_label(None, contact.handle, contact.external_id or contact.phone) or "?"
+        canal = channel_label(contact.canal)
         lines.append(
-            f"{idx}. *{name}* — {identity}\n"
+            f"{idx}. *{name}* — {identity} · {canal}\n"
             f"   {prio} | {contact.minutes_waiting} min | Motivo: {motivo}\n"
             f"   Assumido por: {assumido}"
         )
@@ -123,8 +124,9 @@ def process_new_handover(
         prio = prioridade_label(contact.prioridade)
         waiting = db.get_waiting_contacts()
         identity = resolve_label(None, contact.handle, contact.external_id or contact.phone) or "?"
+        canal = channel_label(contact.canal)
         msg = (
-            f"🆕 *Novo na fila* — {contact.push_name or 'Sem nome'} ({identity})\n"
+            f"🆕 *Novo na fila* — {contact.push_name or 'Sem nome'} ({identity} · {canal})\n"
             f"Prioridade: {prio} | Total na fila: {len(waiting)}"
         )
         if notify_admin(router, msg):
@@ -182,9 +184,10 @@ def notify_assumption(
         return
     name = contact.label
     identity = resolve_label(None, contact.handle, contact.external_id or contact.phone) or "?"
+    canal = channel_label(contact.canal)
     msg = (
         f"📌 *Atendimento assumido*\n"
-        f"{name} ({identity}) — por {admin_phone}"
+        f"{name} ({identity} · {canal}) — por {admin_phone}"
     )
     notify_all_admins_except(router, msg, admin_phone)
 
@@ -213,13 +216,26 @@ def build_daily_summary(db: Database, day: date | None = None) -> str:
     target = day or datetime.now(tz).date()
     stats = db.get_daily_handover_stats(target)
     total_handovers = db.count_handovers_today(target)
+    # Channel breakdown of who is still waiting, reusing the existing
+    # `get_waiting_contacts()` method (not a schema/contract change) — costs
+    # one extra query per call, acceptable since this runs ~1x/day plus
+    # on-demand via the `resumo` command.
+    still_waiting = db.get_waiting_contacts()
+    por_canal: dict[str, int] = {}
+    for contact in still_waiting:
+        canal = channel_label(contact.canal)
+        por_canal[canal] = por_canal.get(canal, 0) + 1
+    canais_str = ", ".join(f"{canal}: {count}" for canal, count in sorted(por_canal.items()))
+    ainda_na_fila = f"{stats['still_waiting']}"
+    if canais_str:
+        ainda_na_fila += f" ({canais_str})"
     return (
         f"📊 *Resumo do dia* — {target.strftime('%d/%m/%Y')}\n\n"
         f"Handovers: {total_handovers}\n"
         f"Atendidos: {stats['atendidos']}\n"
         f"Tempo médio de espera: {stats['avg_wait_minutes']} min\n"
         f"Prioridade alta: {stats['alta_prioridade']}\n"
-        f"Ainda na fila: {stats['still_waiting']}"
+        f"Ainda na fila: {ainda_na_fila}"
     )
 
 

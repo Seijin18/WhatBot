@@ -1,13 +1,21 @@
+import os
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
-from whatbot.channels import INSTAGRAM
+from whatbot.channels import INSTAGRAM, WHATSAPP
 from whatbot.priority import calcular_prioridade_handover, prioridade_label
-from whatbot.queue import format_waiting_list, normalize_phone
+from whatbot.queue import (
+    build_daily_summary,
+    format_waiting_list,
+    normalize_phone,
+    notify_assumption,
+    process_new_handover,
+)
 from whatbot.db import WaitingContact
 from whatbot.webhook import parse_outgoing_staff_message
 
-from fakes import FakeDatabase
+from fakes import FakeClient, FakeDatabase
 
 
 class TestPriority(unittest.TestCase):
@@ -79,6 +87,153 @@ class TestQueueFormat(unittest.TestCase):
         # Identity chip uses the unified precedence (handle -> external_id,
         # see whatbot/db.py:resolve_label) — handle wins here.
         self.assertIn("@maria_ig", text)
+
+    def test_format_shows_whatsapp_channel_label(self):
+        """`format_waiting_list` (the `#fila` listing) must name the channel
+        next to each contact, not just the identity chip
+        (channel-queue-visibility)."""
+        contacts = [
+            WaitingContact(
+                id=1,
+                phone="5511888888888",
+                push_name="Maria",
+                handover_at=datetime.now(timezone.utc),
+                handover_motivo="pedido_do_cliente",
+                minutes_waiting=5,
+                prioridade=0,
+                assumido_por=None,
+                canal=WHATSAPP,
+            )
+        ]
+        text = format_waiting_list(contacts, "Fila")
+        self.assertIn("WhatsApp", text)
+
+    def test_format_shows_instagram_channel_label(self):
+        contacts = [
+            WaitingContact(
+                id=1,
+                phone=None,
+                push_name="Maria IG",
+                handover_at=datetime.now(timezone.utc),
+                handover_motivo="pedido_do_cliente",
+                minutes_waiting=2,
+                prioridade=0,
+                assumido_por=None,
+                canal=INSTAGRAM,
+                external_id="17841400000000000",
+                handle="@maria_ig",
+            )
+        ]
+        text = format_waiting_list(contacts, "Fila")
+        self.assertIn("Instagram", text)
+
+
+class TestNotifyAssumptionShowsChannel(unittest.TestCase):
+    """`notify_assumption` ("atendimento assumido") must name the channel
+    (channel-queue-visibility)."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"ADMIN_NOTIFY_PHONES": "5511900000001,5511900000002"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_whatsapp_contact_shows_whatsapp(self):
+        contact = WaitingContact(
+            id=1,
+            phone="5511888888888",
+            push_name="Maria",
+            handover_at=datetime.now(timezone.utc),
+            handover_motivo="pedido_do_cliente",
+            minutes_waiting=5,
+            prioridade=0,
+            assumido_por="5511900000001",
+            canal=WHATSAPP,
+        )
+        router = FakeClient(WHATSAPP)
+
+        notify_assumption(router, "5511900000001", contact)
+
+        self.assertTrue(router.sent)
+        self.assertIn("WhatsApp", router.sent[0]["text"])
+
+    def test_instagram_contact_shows_instagram(self):
+        contact = WaitingContact(
+            id=1,
+            phone=None,
+            push_name="Maria IG",
+            handover_at=datetime.now(timezone.utc),
+            handover_motivo="pedido_do_cliente",
+            minutes_waiting=2,
+            prioridade=0,
+            assumido_por="5511900000001",
+            canal=INSTAGRAM,
+            external_id="17841400000000000",
+            handle="@maria_ig",
+        )
+        router = FakeClient(WHATSAPP)
+
+        notify_assumption(router, "5511900000001", contact)
+
+        self.assertTrue(router.sent)
+        self.assertIn("Instagram", router.sent[0]["text"])
+
+
+class TestBuildDailySummaryShowsChannelBreakdown(unittest.TestCase):
+    """`build_daily_summary` ("Ainda na fila") must break the still-waiting
+    count down by channel (channel-queue-visibility)."""
+
+    def test_summary_lists_waiting_contacts_by_channel(self):
+        db = FakeDatabase()
+        wa_contact = db.create_contact(phone="5511888888888", push_name="Maria")
+        db.enroll_handover(wa_contact.id, motivo="pedido_do_cliente")
+        ig_contact = db.create_contact(
+            canal=INSTAGRAM, external_id="17841400000000000", handle="@maria_ig"
+        )
+        db.enroll_handover(ig_contact.id, motivo="pedido_do_cliente")
+
+        summary = build_daily_summary(db)
+
+        self.assertIn("Ainda na fila", summary)
+        self.assertIn("WhatsApp: 1", summary)
+        self.assertIn("Instagram: 1", summary)
+
+
+class TestProcessNewHandoverShowsChannel(unittest.TestCase):
+    """Immediate handover notification names the channel, not just the label
+    (channel-queue-visibility)."""
+
+    def setUp(self):
+        self.db = FakeDatabase()
+        patcher = patch.dict(os.environ, {"ADMIN_NOTIFY_PHONES": "5511900000001"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_whatsapp_contact_shows_whatsapp(self):
+        contact = self.db.create_contact(phone="5511888888888", push_name="Maria")
+        self.db.enroll_handover(contact.id, motivo="pedido_do_cliente")
+        waiting = self.db.get_contact_waiting("5511888888888")
+        router = FakeClient(WHATSAPP)
+
+        process_new_handover(self.db, router, contact=waiting)
+
+        self.assertTrue(router.sent)
+        self.assertIn("WhatsApp", router.sent[0]["text"])
+
+    def test_instagram_contact_shows_instagram(self):
+        contact = self.db.create_contact(
+            canal=INSTAGRAM, external_id="17841400000000000", handle="@maria_ig"
+        )
+        self.db.enroll_handover(contact.id, motivo="pedido_do_cliente")
+        waiting = self.db.get_contact_waiting(
+            "17841400000000000", canal=INSTAGRAM
+        )
+        router = FakeClient(WHATSAPP)
+
+        process_new_handover(self.db, router, contact=waiting)
+
+        self.assertTrue(router.sent)
+        self.assertIn("Instagram", router.sent[0]["text"])
+        self.assertIn("@maria_ig", router.sent[0]["text"])
 
 
 class TestProcessAutoReactivations(unittest.TestCase):

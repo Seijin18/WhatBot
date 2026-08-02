@@ -160,6 +160,9 @@ class TestChannelRouting(MainE2ETestCase):
         admin_sends = [m for m in self.wa.sent if m["to"] == ADMIN_PHONE]
         self.assertTrue(admin_sends)
         self.assertIn("Novo na fila", admin_sends[0]["text"])
+        # Secretariat must know which channel to answer on, not just the
+        # customer's readable label (channel-queue-visibility).
+        self.assertIn("Instagram", admin_sends[0]["text"])
 
     def test_handover_on_whatsapp_notifies_admin_and_customer(self):
         result = self.customer_sends("quero falar com a secretaria")
