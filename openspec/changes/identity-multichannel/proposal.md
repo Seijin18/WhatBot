@@ -66,7 +66,14 @@ separada de `instagram`.
   contatos não-WhatsApp.
 - `whatbot/contact_resolver.py:43` e os pontos de `whatbot/queue.py` que
   interpolam `contact.phone` diretamente (incluindo
-  `process_auto_reactivations`) são corrigidos para tolerar `phone=None`.
+  `process_auto_reactivations`) são corrigidos para tolerar `phone=None`,
+  usando `resolve_label` (nome → handle → identidade externa) no lugar do
+  telefone cru. **Mudança de comportamento observável**: a notificação de
+  "bot reativado automaticamente" (`process_auto_reactivations`) e as
+  demais notificações de fila passam a mostrar nome/handle em vez de
+  telefone também para contatos WhatsApp já existentes, quando o contato
+  tem nome cadastrado — não é regressão, mas é uma mudança de texto que a
+  secretaria vai notar.
 - `whatbot/domain.py:115` (`executar_handover_para_secretaria`) passa a usar
   o `canal` que já recebe como parâmetro (hoje ignorado na consulta ao
   banco), evitando falha silenciosa de handover para contatos não-WhatsApp.

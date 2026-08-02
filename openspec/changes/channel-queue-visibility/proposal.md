@@ -2,24 +2,29 @@
 
 ## Why
 
-`whatbot/channels/base.py` já expõe `channel_label()`, mas nenhum código de
-produção o chama. `whatbot/queue.py` monta notificações e listagens usando
-`contact.phone` diretamente. Hoje isso só é confuso; quando o Instagram
-entrar em produção, seria o risco número um do projeto segundo
-`docs/INSTAGRAM_INTEGRATION_PLAN.md`: a secretaria receberia um IGSID de 17
-dígitos numa notificação e não saberia por qual app responder.
+`whatbot/channels/base.py` já expõe `channel_label()`. Quando o Instagram
+entrar em produção, a secretaria precisa saber por qual app responder — é o
+risco número um do projeto segundo `docs/INSTAGRAM_INTEGRATION_PLAN.md`.
 
-Este change resolve isso com o menor escopo possível, e é demonstrável só
-com WhatsApp — não depende de nenhum código de Instagram existir, só da
-fundação de identidade (`identity-multichannel`).
+**Atualização pós-`identity-multichannel`**: a parte do rótulo legível
+(nome → handle → identidade externa) **já foi consumida** em
+`whatbot/queue.py` durante a implementação daquele change — foi necessário
+porque `contact.phone` virou `NULL` fora do WhatsApp, e as notificações que
+antes imprimiam `contact.phone` cru precisavam de um substituto imediato
+para não quebrar. Ver `openspec/changes/identity-multichannel/design.md`,
+Decisão 8.
+
+O que **falta** e é o escopo real deste change agora: indicar o **canal**
+de origem junto ao rótulo (ex.: "via Instagram"), usando `channel_label()`
+— que segue órfão de qualquer consumidor de produção.
 
 ## What Changes
 
 - `whatbot/queue.py`: notificações de novo item na fila, listagem da fila e
-  resumo diário passam a usar o rótulo legível (nome → handle → identidade
-  externa) e a indicar o canal, em vez de `contact.phone` cru.
-- Nenhuma mudança de schema ou de contrato de canal — só consumo do que
-  `identity-multichannel` já expõe.
+  resumo diário passam a indicar o canal (`channel_label()`) ao lado do
+  rótulo legível que `identity-multichannel` já introduziu.
+- Nenhuma mudança de schema ou de contrato de canal — só consumo do que já
+  existe.
 
 ## Impact
 

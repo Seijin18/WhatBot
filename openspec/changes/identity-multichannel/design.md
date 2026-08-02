@@ -134,15 +134,28 @@ responsável por toda a superfície de schema necessária à sequência inteira,
 mesmo a parte que só será consumida depois. `instagram-ingestion-service`
 referencia essas tabelas como pré-existentes e não as recria.
 
-## Decisão 8: rótulo legível como contrato, não como implementação de fila
+## Decisão 8: rótulo legível como contrato — e consumido aqui onde `phone` vira nullable
 
 `channel_label()` já existe em `whatbot/channels/base.py:48` mas está
 órfão — nenhum código de produção o chama (confirmado por auditoria: único
 consumidor hoje é `tests/test_channel_router.py`). Este change define o
-contrato (precedência nome → arroba/handle → identidade externa) como parte
-da capability `identity`; o consumo real na fila e nas notificações é
-responsabilidade de `channel-queue-visibility`, que depende deste change mas
-não faz parte dele.
+contrato (`resolve_label`/`.label` em `whatbot/db.py`, precedência nome →
+arroba/handle → identidade externa) como parte da capability `identity`.
+
+**Atualização pós-implementação**: `contact_resolver.py::format_disambiguation`
+e os três pontos de `whatbot/queue.py` (notificação de novo item, listagem,
+notificação de assunção) passaram a consumir `resolve_label` **dentro deste
+change**, não em `channel-queue-visibility` como planejado originalmente —
+foi necessário porque `phone` virou `NULL` fora do WhatsApp (Decisão 3) e
+esses pontos exibiam `contact.phone` cru, o que teria quebrado com `None`.
+`process_auto_reactivations` (`db.py`) também passou a devolver rótulos em
+vez de telefones pelo mesmo motivo — notificação de reativação automática
+agora mostra nome/handle quando disponível, mesmo para contatos WhatsApp.
+
+O que **continua** sendo escopo de `channel-queue-visibility`: exibir o
+**canal** de origem junto ao rótulo (ex.: "via Instagram") — isso não foi
+feito aqui. Ver nota correspondente em
+`openspec/changes/channel-queue-visibility/proposal.md`.
 
 ## Evidência do problema atual
 
