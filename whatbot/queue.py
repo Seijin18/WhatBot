@@ -19,7 +19,7 @@ from .config import (
     NOTIFY_QUEUE_BATCH,
 )
 from .channels import send_admin
-from .db import Database, WaitingContact
+from .db import Database, WaitingContact, resolve_label
 from .priority import prioridade_label
 
 logger = logging.getLogger("whatbot.queue")
@@ -60,8 +60,12 @@ def format_waiting_list(
         motivo = contact.handover_motivo or "handover"
         prio = prioridade_label(contact.prioridade)
         assumido = format_admin_phone_label(contact.assumido_por)
+        # Identity chip alongside `name` — same precedence contract as
+        # `WaitingContact.label` (whatbot/db.py:resolve_label), minus the
+        # name itself since it is already shown separately here.
+        identity = resolve_label(None, contact.handle, contact.external_id or contact.phone) or "?"
         lines.append(
-            f"{idx}. *{name}* — {contact.phone}\n"
+            f"{idx}. *{name}* — {identity}\n"
             f"   {prio} | {contact.minutes_waiting} min | Motivo: {motivo}\n"
             f"   Assumido por: {assumido}"
         )
@@ -118,8 +122,9 @@ def process_new_handover(
     if NOTIFY_IMMEDIATE_ON_HANDOVER and contact is not None:
         prio = prioridade_label(contact.prioridade)
         waiting = db.get_waiting_contacts()
+        identity = resolve_label(None, contact.handle, contact.external_id or contact.phone) or "?"
         msg = (
-            f"🆕 *Novo na fila* — {contact.push_name or 'Sem nome'} ({contact.phone})\n"
+            f"🆕 *Novo na fila* — {contact.push_name or 'Sem nome'} ({identity})\n"
             f"Prioridade: {prio} | Total na fila: {len(waiting)}"
         )
         if notify_admin(router, msg):
@@ -175,10 +180,11 @@ def notify_assumption(
 ) -> None:
     if not NOTIFY_ON_ASSUMIR:
         return
-    name = contact.push_name or contact.phone
+    name = contact.label
+    identity = resolve_label(None, contact.handle, contact.external_id or contact.phone) or "?"
     msg = (
         f"📌 *Atendimento assumido*\n"
-        f"{name} ({contact.phone}) — por {admin_phone}"
+        f"{name} ({identity}) — por {admin_phone}"
     )
     notify_all_admins_except(router, msg, admin_phone)
 

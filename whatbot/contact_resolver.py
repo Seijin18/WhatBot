@@ -6,7 +6,8 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-from .db import WaitingContact
+from .channels import WHATSAPP
+from .db import WaitingContact, resolve_label
 from .queue import normalize_phone
 
 
@@ -22,7 +23,14 @@ def _fold(text: str) -> str:
 
 
 def extract_phone_from_text(text: str) -> str | None:
-    match = re.search(r"\d{10,15}", text)
+    """Extract a WhatsApp-shaped phone number from free text.
+
+    Anchored so it never matches inside a longer digit run (e.g. a 17-digit
+    Instagram IGSID) — a phone-shaped substring must be bounded by
+    non-digits on both sides. See design.md, requirement "Normalização de
+    identidade específica por canal".
+    """
+    match = re.search(r"(?<!\d)\d{10,15}(?!\d)", text)
     return normalize_phone(match.group(0)) if match else None
 
 
@@ -40,7 +48,12 @@ def find_waiting_matches(
 
     phone = extract_phone_from_text(query)
     if phone:
-        exact = [c for c in waiting if c.phone == phone or c.phone.endswith(phone[-8:])]
+        # `c.phone` is only set for WhatsApp contacts (None otherwise, see
+        # design.md, Decisão 3) — this naturally scopes phone-digit matching
+        # to WhatsApp and never resolves onto another channel's identity.
+        exact = [
+            c for c in waiting if c.phone and (c.phone == phone or c.phone.endswith(phone[-8:]))
+        ]
         if exact:
             return [ContactMatch(c, 100) for c in exact]
 
@@ -51,12 +64,18 @@ def find_waiting_matches(
     matches: list[ContactMatch] = []
     for contact in waiting:
         name = _fold(contact.push_name or "")
-        if not name:
+        # A contact reachable only by a channel handle (no `push_name`, e.g.
+        # a fresh Instagram contact) must still be findable by name/handle
+        # matching — see design.md, "resolução de contato pela secretaria
+        # falha sem `push_name`".
+        handle = _fold((contact.handle or "").lstrip("@"))
+        haystack = f"{name} {handle}".strip()
+        if not haystack:
             continue
-        score = sum(1 for t in tokens if t in name)
-        if tokens and name.startswith(tokens[0]):
+        score = sum(1 for t in tokens if t in haystack)
+        if tokens and (name.startswith(tokens[0]) or handle.startswith(tokens[0])):
             score += 2
-        if len(tokens) >= 2 and all(t in name for t in tokens):
+        if len(tokens) >= 2 and all(t in haystack for t in tokens):
             score += 3
         if score > 0:
             matches.append(ContactMatch(contact, score))
@@ -71,7 +90,11 @@ def format_disambiguation(matches: list[ContactMatch], acao: str) -> str:
     for idx, match in enumerate(matches[:5], start=1):
         c = match.contact
         name = c.push_name or "Sem nome"
-        lines.append(f"*{idx}.* {name} — {c.phone} ({c.minutes_waiting} min)")
+        # Identity chip shown alongside `name` — same precedence contract as
+        # `Contact.label`/`WaitingContact.label` (whatbot/db.py:resolve_label),
+        # minus the name itself since it is already displayed separately.
+        identity = resolve_label(None, c.handle, c.external_id or c.phone) or "?"
+        lines.append(f"*{idx}.* {name} — {identity} ({c.minutes_waiting} min)")
     lines.append("")
     lines.append(f"Responda com o *número* (1-{min(len(matches), 5)}) ou o *telefone* completo.")
     return "\n".join(lines)
@@ -102,6 +125,9 @@ def waiting_to_dict(contact: WaitingContact) -> dict:
         "handover_motivo": contact.handover_motivo,
         "minutes_waiting": contact.minutes_waiting,
         "prioridade": contact.prioridade,
+        "canal": contact.canal,
+        "external_id": contact.external_id,
+        "handle": contact.handle,
     }
 
 
@@ -117,4 +143,10 @@ def _dict_to_waiting(data: dict) -> WaitingContact:
         minutes_waiting=data.get("minutes_waiting", 0),
         prioridade=data.get("prioridade", 0),
         assumido_por=data.get("assumido_por"),
+        canal=data.get("canal", WHATSAPP),
+        # Fallback to `phone` for admin sessions persisted before this
+        # change (TTL 10 min): those dicts never had an `external_id` key,
+        # and for WhatsApp `phone` is the same identity anyway.
+        external_id=data.get("external_id") or data.get("phone"),
+        handle=data.get("handle"),
     )

@@ -71,6 +71,7 @@ def _write_jsonl(entry: dict[str, Any]) -> None:
 def _emit(entry: dict[str, Any]) -> None:
     entry.setdefault("ts", datetime.now(timezone.utc).isoformat())
     summary = (
+        f"canal={entry.get('canal')} "
         f"phone={entry.get('phone')} "
         f"dir={entry.get('direction')} "
         f"source={entry.get('source')} "
@@ -78,6 +79,7 @@ def _emit(entry: dict[str, Any]) -> None:
     )
     if entry.get("kind") == "llm":
         summary = (
+            f"canal={entry.get('canal')} "
             f"phone={entry.get('phone')} "
             f"llm={entry.get('llm_provider')} "
             f"fallback={entry.get('used_fallback')} "
@@ -92,6 +94,7 @@ def log_inbound(
     phone: str,
     text: str,
     *,
+    canal: str = "whatsapp",
     push_name: str | None = None,
     contact_id: int | None = None,
     source: str = "customer",
@@ -103,6 +106,7 @@ def log_inbound(
         {
             "kind": "message",
             "direction": "in",
+            "canal": canal,
             "phone": phone,
             "text": _truncate(text),
             "text_len": len(text or ""),
@@ -119,17 +123,19 @@ def log_outbound(
     phone: str,
     text: str,
     *,
+    canal: str = "whatsapp",
     contact_id: int | None = None,
     source: str = "bot",
     simulated: bool = False,
     delivery: str = "sent",
     **extra: Any,
 ) -> None:
-    """Log a message sent to WhatsApp (or skipped in simulation)."""
+    """Log a message sent to a channel (or skipped in simulation)."""
     _emit(
         {
             "kind": "message",
             "direction": "out",
+            "canal": canal,
             "phone": phone,
             "text": _truncate(text),
             "text_len": len(text or ""),
@@ -147,6 +153,7 @@ def log_llm_turn(
     user_text: str,
     reply: str,
     *,
+    canal: str = "whatsapp",
     contact_id: int | None = None,
     contact_status: str | None = None,
     used_fallback: bool = False,
@@ -160,6 +167,7 @@ def log_llm_turn(
     _emit(
         {
             "kind": "llm",
+            "canal": canal,
             "phone": phone,
             "user_text": _truncate(user_text),
             "user_text_len": len(user_text or ""),

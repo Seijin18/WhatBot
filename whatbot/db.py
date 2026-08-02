@@ -12,11 +12,27 @@ from datetime import datetime
 import psycopg
 from psycopg_pool import ConnectionPool
 
+from .channels.base import WHATSAPP, normalize_channel
+
+
+def resolve_label(
+    name: str | None, handle: str | None, external_id: str | None
+) -> str:
+    """Precedence for a human-readable identity: name -> channel handle -> raw id.
+
+    Pure, no I/O — safe for any consumer (queue, notifications, logs). This is
+    the single source of truth for the precedence order (see design.md,
+    Decisão 8 / requirement "Rótulo legível de contato"); other modules
+    (`contact_resolver.py`, `queue.py`) must call this instead of
+    reimplementing the precedence locally.
+    """
+    return name or handle or external_id or ""
+
 
 @dataclass
 class Contact:
     id: int
-    phone: str
+    phone: str | None
     status: str
     ia_ativa: bool
     created_at: datetime
@@ -25,18 +41,32 @@ class Contact:
     atendido_at: datetime | None = None
     handover_motivo: str | None = None
     session_state: dict[str, Any] | None = None
+    canal: str = WHATSAPP
+    external_id: str | None = None
+    handle: str | None = None
+
+    @property
+    def label(self) -> str:
+        return resolve_label(self.push_name, self.handle, self.external_id or self.phone)
 
 
 @dataclass
 class WaitingContact:
     id: int
-    phone: str
+    phone: str | None
     push_name: str | None
     handover_at: datetime
     handover_motivo: str | None
     minutes_waiting: int
     prioridade: int = 0
     assumido_por: str | None = None
+    canal: str = WHATSAPP
+    external_id: str | None = None
+    handle: str | None = None
+
+    @property
+    def label(self) -> str:
+        return resolve_label(self.push_name, self.handle, self.external_id or self.phone)
 
 
 @dataclass
@@ -97,6 +127,21 @@ class Database:
         ALTER TABLE contatos ADD COLUMN IF NOT EXISTS assumido_por VARCHAR(32);
         ALTER TABLE contatos ADD COLUMN IF NOT EXISTS bot_resume_at TIMESTAMP WITH TIME ZONE;
         ALTER TABLE contatos ADD COLUMN IF NOT EXISTS session_state JSONB NOT NULL DEFAULT '{}'::jsonb;
+        -- Multichannel identity (ver openspec/changes/identity-multichannel):
+        -- migração aditiva e idempotente, backfill para whatsapp, phone vira
+        -- opcional (NULL fora do WhatsApp), chave de identidade passa a ser
+        -- (canal, external_id).
+        ALTER TABLE contatos ADD COLUMN IF NOT EXISTS canal VARCHAR(32);
+        ALTER TABLE contatos ADD COLUMN IF NOT EXISTS external_id VARCHAR(64);
+        ALTER TABLE contatos ADD COLUMN IF NOT EXISTS handle VARCHAR(128);
+        ALTER TABLE contatos ADD COLUMN IF NOT EXISTS last_inbound_at TIMESTAMP WITH TIME ZONE;
+        UPDATE contatos SET canal = 'whatsapp' WHERE canal IS NULL;
+        UPDATE contatos SET external_id = phone WHERE external_id IS NULL;
+        ALTER TABLE contatos ALTER COLUMN canal SET NOT NULL;
+        ALTER TABLE contatos ALTER COLUMN external_id SET NOT NULL;
+        ALTER TABLE contatos ALTER COLUMN phone DROP NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS contatos_canal_external_id_idx
+            ON contatos (canal, external_id);
         CREATE TABLE IF NOT EXISTS admin_sessao (
             admin_phone VARCHAR(32) PRIMARY KEY,
             acao VARCHAR(32) NOT NULL,
@@ -115,10 +160,34 @@ class Database:
             assumido_por VARCHAR(32),
             motivo VARCHAR(64)
         );
+        ALTER TABLE handover_historico ADD COLUMN IF NOT EXISTS canal VARCHAR(32);
+        ALTER TABLE handover_historico ADD COLUMN IF NOT EXISTS external_id VARCHAR(64);
+        UPDATE handover_historico SET canal = 'whatsapp' WHERE canal IS NULL;
+        UPDATE handover_historico SET external_id = phone WHERE external_id IS NULL;
+        ALTER TABLE handover_historico ALTER COLUMN phone DROP NOT NULL;
         CREATE TABLE IF NOT EXISTS resumo_diario_enviado (
             dia DATE PRIMARY KEY,
             enviado_em TIMESTAMP WITH TIME ZONE DEFAULT now()
         );
+        -- Usadas a partir do change instagram-ingestion-service (ver
+        -- openspec/changes/identity-multichannel/design.md, Decisão 7): a
+        -- criação vive aqui porque este é o único change que altera
+        -- ensure_schema() nesta sequência.
+        CREATE TABLE IF NOT EXISTS canal_credenciais (
+            canal VARCHAR(16) PRIMARY KEY,
+            account_id VARCHAR(64),
+            access_token TEXT NOT NULL,
+            expires_at TIMESTAMP WITH TIME ZONE,
+            refreshed_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+        );
+        CREATE TABLE IF NOT EXISTS webhook_eventos (
+            canal VARCHAR(16) NOT NULL,
+            message_id VARCHAR(128) NOT NULL,
+            received_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+            PRIMARY KEY (canal, message_id)
+        );
+        CREATE INDEX IF NOT EXISTS webhook_eventos_received_idx
+            ON webhook_eventos (received_at);
         INSERT INTO notificacao_admin (id, pendentes_desde_ultimo_lote) VALUES (1, 0)
         ON CONFLICT (id) DO NOTHING;
         """
@@ -153,20 +222,34 @@ class Database:
             atendido_at=row[7] if len(row) > 7 else None,
             handover_motivo=row[8] if len(row) > 8 else None,
             session_state=session_state,
+            canal=row[10] if len(row) > 10 and row[10] else WHATSAPP,
+            external_id=row[11] if len(row) > 11 else None,
+            handle=row[12] if len(row) > 12 else None,
         )
 
     _CONTACT_SELECT = """
         SELECT id, phone, status, ia_ativa, created_at,
-               push_name, handover_at, atendido_at, handover_motivo, session_state
+               push_name, handover_at, atendido_at, handover_motivo, session_state,
+               canal, external_id, handle
         FROM contatos
     """
 
-    def get_contact_by_phone(self, phone: str) -> Optional[Contact]:
+    def get_contact_by_phone(self, phone: str, canal: str | None = None) -> Optional[Contact]:
+        """Look up a contact by its channel-scoped identity.
+
+        `phone` is the external identity (phone on WhatsApp, IGSID on
+        Instagram, ...); kept named `phone` for compatibility with existing
+        WhatsApp call sites, which never pass `canal` explicitly.
+        """
+        canal = normalize_channel(canal)
         self.init_pool()
         try:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(f"{self._CONTACT_SELECT} WHERE phone = %s", (phone,))
+                    cur.execute(
+                        f"{self._CONTACT_SELECT} WHERE canal = %s AND external_id = %s",
+                        (canal, phone),
+                    )
                     row = cur.fetchone()
                     if not row:
                         return None
@@ -177,31 +260,52 @@ class Database:
 
     def create_contact(
         self,
-        phone: str,
+        phone: str | None = None,
         status: str = "novo_lead",
         ia_ativa: bool = True,
         push_name: str | None = None,
+        *,
+        canal: str | None = None,
+        external_id: str | None = None,
+        handle: str | None = None,
     ) -> Contact:
+        """Create a contact identified by `(canal, external_id)`.
+
+        `phone=` remains a valid kwarg for WhatsApp call sites (compat): when
+        `canal` is `whatsapp` (the default), `phone` doubles as `external_id`
+        if `external_id` is not given explicitly. For any other channel,
+        `phone` is stored as `NULL` (see design.md, Decisão 3) — pass
+        `external_id=` instead.
+        """
+        canal = normalize_channel(canal)
+        external_id = external_id or phone
+        if not external_id:
+            raise ValueError("create_contact requer external_id (ou phone para whatsapp)")
+        stored_phone = external_id if canal == WHATSAPP else None
         self.init_pool()
         try:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         """
-                        INSERT INTO contatos (phone, status, ia_ativa, push_name)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO contatos
+                            (phone, status, ia_ativa, push_name, canal, external_id, handle)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         RETURNING id, created_at
                         """,
-                        (phone, status, ia_ativa, push_name),
+                        (stored_phone, status, ia_ativa, push_name, canal, external_id, handle),
                     )
                     row = cur.fetchone()
                     return Contact(
                         id=row[0],
-                        phone=phone,
+                        phone=stored_phone,
                         status=status,
                         ia_ativa=ia_ativa,
                         created_at=row[1],
                         push_name=push_name,
+                        canal=canal,
+                        external_id=external_id,
+                        handle=handle,
                     )
         except Exception as e:
             self._logger.exception("Erro criando contato: %s", e)
@@ -272,8 +376,8 @@ class Database:
                     (motivo, prioridade, push_name, contact_id),
                 )
 
-    def is_waiting(self, phone: str) -> bool:
-        contact = self.get_contact_by_phone(phone)
+    def is_waiting(self, phone: str, canal: str | None = None) -> bool:
+        contact = self.get_contact_by_phone(phone, canal=canal)
         return (
             contact is not None
             and contact.handover_at is not None
@@ -284,7 +388,7 @@ class Database:
         return """
             SELECT id, phone, push_name, handover_at, handover_motivo,
                    EXTRACT(EPOCH FROM (now() - handover_at)) / 60 AS minutes_waiting,
-                   prioridade, assumido_por
+                   prioridade, assumido_por, canal, external_id, handle
             FROM contatos
             WHERE handover_at IS NOT NULL AND atendido_at IS NULL
         """
@@ -299,6 +403,9 @@ class Database:
             minutes_waiting=int(r[5] or 0),
             prioridade=int(r[6] or 0),
             assumido_por=r[7],
+            canal=r[8] if len(r) > 8 and r[8] else WHATSAPP,
+            external_id=r[9] if len(r) > 9 else None,
+            handle=r[10] if len(r) > 10 else None,
         )
 
     def get_waiting_contacts(self) -> List[WaitingContact]:
@@ -311,13 +418,14 @@ class Database:
                 )
                 return [self._row_to_waiting(r) for r in cur.fetchall()]
 
-    def get_contact_waiting(self, phone: str) -> WaitingContact | None:
+    def get_contact_waiting(self, phone: str, canal: str | None = None) -> WaitingContact | None:
+        canal = normalize_channel(canal)
         self.init_pool()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    self._waiting_select() + " AND phone = %s",
-                    (phone,),
+                    self._waiting_select() + " AND canal = %s AND external_id = %s",
+                    (canal, phone),
                 )
                 row = cur.fetchone()
                 return self._row_to_waiting(row) if row else None
@@ -372,29 +480,37 @@ class Database:
         self,
         cur,
         contact_id: int,
-        phone: str,
         assumido_por: str | None,
     ) -> None:
         cur.execute(
             """
-            SELECT push_name, handover_at, handover_motivo, prioridade
+            SELECT phone, push_name, handover_at, handover_motivo, prioridade,
+                   canal, external_id
             FROM contatos WHERE id = %s
             """,
             (contact_id,),
         )
         row = cur.fetchone()
-        if not row or row[1] is None:
+        if not row or row[2] is None:
             return
-        push_name, handover_at, motivo, prioridade = row[0], row[1], row[2], row[3] or 0
+        phone, push_name, handover_at, motivo, prioridade, canal, external_id = (
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4] or 0,
+            row[5],
+            row[6],
+        )
         cur.execute(
             """
             INSERT INTO handover_historico
                 (contact_id, phone, push_name, handover_at, atendido_at,
-                 wait_minutes, prioridade, assumido_por, motivo)
+                 wait_minutes, prioridade, assumido_por, motivo, canal, external_id)
             VALUES (
                 %s, %s, %s, %s, now(),
                 GREATEST(0, EXTRACT(EPOCH FROM (now() - %s)) / 60)::int,
-                %s, %s, %s
+                %s, %s, %s, %s, %s
             )
             """,
             (
@@ -406,6 +522,8 @@ class Database:
                 prioridade,
                 assumido_por,
                 motivo,
+                canal,
+                external_id,
             ),
         )
 
@@ -415,24 +533,27 @@ class Database:
         reativar_bot: bool = False,
         assumido_por: str | None = None,
         schedule_resume_hours: int | None = None,
+        *,
+        canal: str | None = None,
     ) -> bool:
+        canal = normalize_channel(canal)
         self.init_pool()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT id FROM contatos
-                    WHERE phone = %s
+                    WHERE canal = %s AND external_id = %s
                       AND handover_at IS NOT NULL
                       AND atendido_at IS NULL
                     """,
-                    (phone,),
+                    (canal, phone),
                 )
                 row = cur.fetchone()
                 if not row:
                     return False
                 contact_id = row[0]
-                self._archive_handover(cur, contact_id, phone, assumido_por)
+                self._archive_handover(cur, contact_id, assumido_por)
 
                 if reativar_bot:
                     resume_sql = "NULL"
@@ -461,7 +582,10 @@ class Database:
                 )
                 return True
 
-    def assumir_contato(self, phone: str, admin_phone: str) -> WaitingContact | None:
+    def assumir_contato(
+        self, phone: str, admin_phone: str, *, canal: str | None = None
+    ) -> WaitingContact | None:
+        canal = normalize_channel(canal)
         self.init_pool()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
@@ -469,18 +593,19 @@ class Database:
                     """
                     UPDATE contatos
                     SET assumido_por = %s
-                    WHERE phone = %s
+                    WHERE canal = %s AND external_id = %s
                       AND handover_at IS NOT NULL
                       AND atendido_at IS NULL
                     RETURNING id
                     """,
-                    (admin_phone, phone),
+                    (admin_phone, canal, phone),
                 )
                 if not cur.fetchone():
                     return None
-        return self.get_contact_waiting(phone)
+        return self.get_contact_waiting(phone, canal=canal)
 
-    def reativar_bot(self, phone: str) -> bool:
+    def reativar_bot(self, phone: str, *, canal: str | None = None) -> bool:
+        canal = normalize_channel(canal)
         self.init_pool()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
@@ -495,10 +620,10 @@ class Database:
                         prioridade = 0,
                         assumido_por = NULL,
                         bot_resume_at = NULL
-                    WHERE phone = %s
+                    WHERE canal = %s AND external_id = %s
                     RETURNING id
                     """,
-                    (phone,),
+                    (canal, phone),
                 )
                 return cur.fetchone() is not None
 
@@ -512,10 +637,11 @@ class Database:
         count = 0
         for contact in waiting:
             if self.mark_attended(
-                contact.phone,
+                contact.external_id,
                 reativar_bot=reativar_bot,
                 assumido_por=assumido_por,
                 schedule_resume_hours=schedule_resume_hours,
+                canal=contact.canal,
             ):
                 count += 1
         return count
@@ -660,7 +786,12 @@ class Database:
                 return row[0] if row else None
 
     def process_auto_reactivations(self) -> list[str]:
-        """Re-enable bot for contacts past scheduled resume time."""
+        """Re-enable bot for contacts past scheduled resume time.
+
+        Returns a human-readable label per contact (name -> handle -> external
+        id), never a raw `phone`, since it can be `NULL` for non-WhatsApp
+        contacts.
+        """
         self.init_pool()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
@@ -671,10 +802,12 @@ class Database:
                     WHERE ia_ativa = FALSE
                       AND bot_resume_at IS NOT NULL
                       AND bot_resume_at <= now()
-                    RETURNING phone
+                    RETURNING phone, push_name, handle, external_id
                     """
                 )
-                return [r[0] for r in cur.fetchall()]
+                return [
+                    resolve_label(r[1], r[2], r[3] or r[0]) for r in cur.fetchall()
+                ]
 
     def save_admin_sessao(
         self, admin_phone: str, acao: str, candidatos: list[dict]
@@ -728,7 +861,12 @@ class Database:
                 )
 
     def search_contacts_for_admin(self, query: str) -> list[dict]:
-        """Search contacts by phone fragment or name (for reactivate)."""
+        """Search contacts by phone fragment or name (for reactivate).
+
+        Not scoped to a single channel: the secretariat searches by name
+        across every contact, WhatsApp or not. `phone` in the result may be
+        `None` for non-WhatsApp contacts — callers use `label`/`external_id`.
+        """
         import unicodedata
 
         phone = re.sub(r"\D", "", query)
@@ -736,14 +874,20 @@ class Database:
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 if phone and len(phone) >= 8:
+                    # `phone` is only ever set for WhatsApp contacts (NULL
+                    # otherwise), so also match `external_id` directly —
+                    # non-WhatsApp identities (e.g. an IGSID) never populate
+                    # `phone` (see design.md, Decisão 3).
                     cur.execute(
                         """
                         SELECT id, phone, push_name, ia_ativa,
-                               handover_at IS NOT NULL AND atendido_at IS NULL AS in_queue
-                        FROM contatos WHERE phone LIKE %s
+                               handover_at IS NOT NULL AND atendido_at IS NULL AS in_queue,
+                               canal, external_id, handle
+                        FROM contatos
+                        WHERE phone LIKE %s OR external_id LIKE %s
                         ORDER BY created_at DESC LIMIT 5
                         """,
-                        (f"%{phone[-8:]}%",),
+                        (f"%{phone[-8:]}%", f"%{phone[-8:]}%"),
                     )
                 else:
                     folded = unicodedata.normalize("NFKD", query.lower())
@@ -751,12 +895,13 @@ class Database:
                     cur.execute(
                         """
                         SELECT id, phone, push_name, ia_ativa,
-                               handover_at IS NOT NULL AND atendido_at IS NULL AS in_queue
+                               handover_at IS NOT NULL AND atendido_at IS NULL AS in_queue,
+                               canal, external_id, handle
                         FROM contatos
-                        WHERE push_name ILIKE %s
+                        WHERE push_name ILIKE %s OR handle ILIKE %s
                         ORDER BY created_at DESC LIMIT 5
                         """,
-                        (term,),
+                        (term, term),
                     )
                 return [
                     {
@@ -765,6 +910,10 @@ class Database:
                         "push_name": r[2],
                         "ia_ativa": r[3],
                         "in_queue": r[4],
+                        "canal": r[5],
+                        "external_id": r[6],
+                        "handle": r[7],
+                        "label": resolve_label(r[2], r[7], r[6] or r[1]),
                     }
                     for r in cur.fetchall()
                 ]

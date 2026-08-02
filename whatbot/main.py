@@ -20,6 +20,7 @@ from .config import (
     should_respond_to_customer,
 )
 from .channels import (
+    WHATSAPP,
     ChannelError,
     ChannelRouter,
     EvolutionApiClient,
@@ -98,11 +99,13 @@ def _init_infra() -> None:
     if _llm is None:
         _llm = create_llm_client()
     if is_test_mode():
-        from .config import get_test_phones
+        from .config import get_test_identities
 
         logger.warning(
-            "TEST_MODE ativo — o bot responde apenas a TEST_PHONES: %s",
-            ", ".join(get_test_phones()) or "(lista vazia)",
+            "TEST_MODE ativo — o bot responde apenas às listas por canal "
+            "(TEST_PHONES para whatsapp: %s | TEST_IGSIDS para instagram: %s)",
+            ", ".join(get_test_identities("whatsapp")) or "(lista vazia)",
+            ", ".join(get_test_identities("instagram")) or "(lista vazia)",
         )
 
 
@@ -151,8 +154,11 @@ def run_admin_simulation(
     canal: str | None = None,
 ) -> Dict[str, Any]:
     admin_phone = normalize_phone(admin_phone)
-    sim_phone = normalize_phone(resolve_simulate_phone(sim_phone))
     canal = normalize_channel(canal)
+    if canal == WHATSAPP:
+        sim_phone = normalize_phone(resolve_simulate_phone(sim_phone))
+    else:
+        sim_phone = sim_phone or resolve_simulate_phone(None)
     logger.info(
         "Simulação cliente %s (%s) por admin %s", sim_phone, canal, admin_phone
     )
@@ -212,24 +218,28 @@ def process_customer_message(
         logger.exception("Falha na reativação automática do bot")
 
     try:
-        contact = _db.get_contact_by_phone(phone)
+        contact = _db.get_contact_by_phone(phone, canal=canal)
         if contact is None:
             contact = _db.create_contact(
-                phone=phone, status="novo_lead", ia_ativa=True, push_name=push_name
+                phone=phone,
+                status="novo_lead",
+                ia_ativa=True,
+                push_name=push_name,
+                canal=canal,
             )
-            logger.info("Criado novo contato: %s", contact.phone)
+            logger.info("Criado novo contato: %s", contact.label)
         else:
             if push_name:
                 _db.update_contact_push_name(contact.id, push_name)
             logger.info(
-                "Contato existente: %s (ia_ativa=%s)", contact.phone, contact.ia_ativa
+                "Contato existente: %s (ia_ativa=%s)", contact.label, contact.ia_ativa
             )
     except Exception as e:
         logger.exception("Erro DB ao obter/criar contato: %s", e)
         return {"ok": False, "error": "db_error", "detail": str(e)}
 
     if not contact.ia_ativa:
-        logger.info("IA desativada para %s - early return", contact.phone)
+        logger.info("IA desativada para %s - early return", contact.label)
         try:
             _db.save_message(contact.id, direction="in", text=text)
         except Exception:
@@ -250,6 +260,7 @@ def process_customer_message(
     log_inbound(
         phone,
         text,
+        canal=canal,
         push_name=push_name,
         contact_id=contact.id,
         source="customer",
@@ -376,6 +387,7 @@ def process_customer_message(
         phone,
         text,
         model_reply or "",
+        canal=canal,
         contact_id=contact.id,
         contact_status=contact.status,
         used_fallback=used_fallback,
@@ -430,6 +442,7 @@ def process_customer_message(
             log_outbound(
                 phone,
                 model_reply,
+                canal=canal,
                 source="bot",
                 contact_id=contact.id,
                 simulated=True,
@@ -481,6 +494,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
                 text,
                 source="staff",
                 delivery="whatsapp_business",
+                canal=outgoing.get("canal") or WHATSAPP,
             )
             if is_admin_phone(to_phone) and text:
                 sim = _resolve_admin_simulate(text)
@@ -536,10 +550,11 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         logger.warning("Payload incompleto: phone/text ausentes")
         return {"ok": False, "error": "invalid_payload"}
 
-    if is_admin_phone(phone):
+    if canal == WHATSAPP and is_admin_phone(phone):
         log_inbound(
             normalize_phone(phone),
             text,
+            canal=canal,
             push_name=push_name,
             source="admin",
         )
@@ -564,9 +579,14 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             logger.exception("Erro no comando admin: %s", e)
             return {"ok": False, "error": "admin_command_failed", "detail": str(e)}
 
-    phone = normalize_phone(phone)
-    if not should_respond_to_customer(phone):
-        logger.info("Modo teste: ignorando mensagem de %s (fora de TEST_PHONES)", phone)
+    if canal == WHATSAPP:
+        phone = normalize_phone(phone)
+    if not should_respond_to_customer(phone, canal=canal):
+        logger.info(
+            "Modo teste: ignorando mensagem de %s (%s) fora da lista de teste",
+            phone,
+            canal,
+        )
         return {"ok": True, "ignored": True, "reason": "test_mode"}
 
     return process_customer_message(phone, text, push_name=push_name, canal=canal)

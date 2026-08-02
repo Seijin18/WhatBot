@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from .admin_nlu import parse_admin_intent
 from .config import AUTO_REACTIVATE_HOURS
@@ -13,8 +14,8 @@ from .contact_resolver import (
     pick_from_disambiguation,
     waiting_to_dict,
 )
-from .db import Database
-from .channels import send_admin
+from .db import Database, WaitingContact
+from .channels import WHATSAPP, send_admin
 from .queue import (
     build_daily_summary,
     format_waiting_list,
@@ -23,6 +24,20 @@ from .queue import (
 )
 
 logger = logging.getLogger("whatbot.admin")
+
+
+@dataclass
+class TargetIdentity:
+    """A contact identity resolved outside the waiting queue (e.g. reactivate).
+
+    Mirrors the subset of `WaitingContact` that `_execute_action` needs
+    (`external_id`, `canal`, `label`), so both types can be passed there
+    interchangeably.
+    """
+
+    external_id: str
+    canal: str
+    label: str
 
 HELP_TEXT = """*Secretaria — fale naturalmente*
 
@@ -69,23 +84,23 @@ def _try_pending_disambiguation(
 
     db.clear_admin_sessao(admin_phone)
     return _execute_action(
-        acao, picked.phone, admin_phone, db, router, contact_id, picked.push_name
+        acao, picked, admin_phone, db, router, contact_id, picked.push_name
     )
 
 
 def _execute_action(
     acao: str,
-    target_phone: str,
+    target: WaitingContact | TargetIdentity,
     admin_phone: str,
     db: Database,
     router,
     contact_id: int,
     name: str | None = None,
 ) -> dict:
-    label = name or target_phone
+    label = name or target.label
 
     if acao == "assume":
-        contact = db.assumir_contato(target_phone, admin_phone)
+        contact = db.assumir_contato(target.external_id, admin_phone, canal=target.canal)
         if contact:
             notify_assumption(router, admin_phone, contact)
             return _reply(
@@ -93,18 +108,19 @@ def _execute_action(
                 db,
                 admin_phone,
                 contact_id,
-                f"📌 Você assumiu *{label}* ({target_phone}).",
+                f"📌 Você assumiu *{label}*.",
             )
         return _reply(
-            router, db, admin_phone, contact_id, f"{target_phone} não está na fila."
+            router, db, admin_phone, contact_id, f"{label} não está na fila."
         )
 
     if acao == "complete":
         if db.mark_attended(
-            target_phone,
+            target.external_id,
             reativar_bot=False,
             assumido_por=admin_phone,
             schedule_resume_hours=AUTO_REACTIVATE_HOURS,
+            canal=target.canal,
         ):
             return _reply(
                 router,
@@ -114,24 +130,24 @@ def _execute_action(
                 f"✅ *{label}* atendido. Bot reativa automaticamente em {AUTO_REACTIVATE_HOURS}h.",
             )
         return _reply(
-            router, db, admin_phone, contact_id, f"{target_phone} não está na fila."
+            router, db, admin_phone, contact_id, f"{label} não está na fila."
         )
 
     if acao == "reactivate":
-        if db.reativar_bot(target_phone):
+        if db.reativar_bot(target.external_id, canal=target.canal):
             return _reply(
                 router,
                 db,
                 admin_phone,
                 contact_id,
-                f"✅ Bot reativado para *{label}* ({target_phone}).",
+                f"✅ Bot reativado para *{label}*.",
             )
         return _reply(
             router,
             db,
             admin_phone,
             contact_id,
-            f"Contato {target_phone} não encontrado.",
+            f"Contato {label} não encontrado.",
         )
 
     return _reply(router, db, admin_phone, contact_id, "Ação desconhecida.")
@@ -139,17 +155,17 @@ def _execute_action(
 
 def _resolve_waiting(
     query: str, acao: str, admin_phone: str, db: Database
-) -> tuple[str | None, str | None]:
+) -> tuple[WaitingContact | None, str | None]:
     phone = extract_phone_from_text(query)
     if phone:
         waiting = db.get_contact_waiting(phone)
         if waiting:
-            return phone, None
+            return waiting, None
         return None, f"*{phone}* não está na fila."
 
     matches = find_waiting_matches(query, db.get_waiting_contacts())
     if len(matches) == 1:
-        return matches[0].contact.phone, None
+        return matches[0].contact, None
     if len(matches) > 1:
         top = matches[:5]
         db.save_admin_sessao(
@@ -162,14 +178,22 @@ def _resolve_waiting(
 
 def _resolve_reactivate(
     query: str, admin_phone: str, db: Database
-) -> tuple[str | None, str | None]:
+) -> tuple[TargetIdentity | None, str | None]:
     phone = extract_phone_from_text(query)
     if phone:
-        return phone, None
+        return TargetIdentity(external_id=phone, canal=WHATSAPP, label=phone), None
 
     rows = [r for r in db.search_contacts_for_admin(query) if not r["ia_ativa"]]
     if len(rows) == 1:
-        return rows[0]["phone"], None
+        r = rows[0]
+        return (
+            TargetIdentity(
+                external_id=r["external_id"] or r["phone"],
+                canal=r["canal"],
+                label=r["label"],
+            ),
+            None,
+        )
     if len(rows) > 1:
         candidatos = [
             {
@@ -178,6 +202,9 @@ def _resolve_reactivate(
                 "push_name": r["push_name"],
                 "minutes_waiting": 0,
                 "prioridade": 0,
+                "canal": r["canal"],
+                "external_id": r["external_id"],
+                "handle": r["handle"],
             }
             for r in rows[:5]
         ]
@@ -186,7 +213,7 @@ def _resolve_reactivate(
         for idx, r in enumerate(rows[:5], start=1):
             name = r["push_name"] or "Sem nome"
             fila = " (na fila)" if r["in_queue"] else ""
-            lines.append(f"*{idx}.* {name} — {r['phone']}{fila}")
+            lines.append(f"*{idx}.* {name} — {r['label']}{fila}")
         lines.append("\nResponda com *1*, *2*... ou o telefone.")
         return None, "\n".join(lines)
 

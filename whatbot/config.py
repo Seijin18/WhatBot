@@ -59,6 +59,15 @@ DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 ENV_ADMIN_NOTIFY_PHONES = "ADMIN_NOTIFY_PHONES"
 ENV_TEST_MODE = "TEST_MODE"
 ENV_TEST_PHONES = "TEST_PHONES"
+ENV_TEST_IGSIDS = "TEST_IGSIDS"
+
+# Test-mode allowlist env var per channel (see design.md, Decisão 6). A
+# channel missing from this map has no allowlist at all, which makes
+# `should_respond_to_customer` fail-closed for it.
+_TEST_LIST_ENV_BY_CHANNEL = {
+    "whatsapp": ENV_TEST_PHONES,
+    "instagram": ENV_TEST_IGSIDS,
+}
 NOTIFY_QUEUE_BATCH = int(os.getenv("NOTIFY_QUEUE_BATCH", "5"))
 NOTIFY_LONG_WAIT_MINUTES = int(os.getenv("NOTIFY_LONG_WAIT_MINUTES", "15"))
 NOTIFY_IMMEDIATE_ON_HANDOVER = os.getenv(
@@ -129,23 +138,62 @@ def is_test_mode() -> bool:
     }
 
 
+def _normalize_canal(canal: str | None) -> str:
+    """Normalize a channel name, delegating to `whatbot.channels.base`.
+
+    Imported lazily (inside the function, not at module load time):
+    `whatbot.channels/__init__.py` imports `whatbot.channels.whatsapp_evolution`,
+    which does `from ..config import EVOLUTION_API_BASE_URL` — a top-level
+    import here would run while `whatbot.config` is still being loaded,
+    creating a circular import. By the time this function is actually
+    called, `whatbot.config` has finished loading, so the cycle never
+    triggers.
+    """
+    from .channels.base import normalize_channel
+
+    return normalize_channel(canal)
+
+
+def get_test_identities(canal: str | None = None) -> list[str]:
+    """Test-mode allowlist for a channel (`TEST_PHONES` for WhatsApp,
+    `TEST_IGSIDS` for Instagram). A channel without a configured env var
+    returns an empty list, which is what makes `should_respond_to_customer`
+    fail-closed for it."""
+    canal = _normalize_canal(canal)
+    env_var = _TEST_LIST_ENV_BY_CHANNEL.get(canal)
+    if not env_var:
+        return []
+    raw = os.getenv(env_var, "")
+    if canal == "whatsapp":
+        return _parse_phone_list(raw)
+    return [v.strip() for v in raw.split(",") if v.strip()]
+
+
 def get_test_phones() -> list[str]:
-    """Phones allowed to receive bot replies when TEST_MODE is enabled."""
-    return _parse_phone_list(os.getenv(ENV_TEST_PHONES, ""))
+    """Phones allowed to receive bot replies when TEST_MODE is enabled (WhatsApp)."""
+    return get_test_identities("whatsapp")
+
+
+def is_test_identity(external_id: str, canal: str | None = None) -> bool:
+    canal = _normalize_canal(canal)
+    if canal == "whatsapp":
+        import re
+
+        normalized = re.sub(r"\D", "", external_id.split("@", 1)[0])
+    else:
+        normalized = external_id
+    return normalized in get_test_identities(canal)
 
 
 def is_test_phone(phone: str) -> bool:
-    import re
-
-    normalized = re.sub(r"\D", "", phone.split("@", 1)[0])
-    return normalized in get_test_phones()
+    return is_test_identity(phone, "whatsapp")
 
 
-def should_respond_to_customer(phone: str) -> bool:
+def should_respond_to_customer(external_id: str, canal: str | None = None) -> bool:
     """Whether an inbound customer message should be processed."""
     if not is_test_mode():
         return True
-    return is_test_phone(phone)
+    return is_test_identity(external_id, canal)
 
 
 def get_admin_phones() -> list[str]:
