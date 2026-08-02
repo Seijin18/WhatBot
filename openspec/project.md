@@ -27,14 +27,44 @@ fila que a secretaria opera por comandos em linguagem natural.
   Descoberta por `python -m unittest discover -s tests -p 'test_*.py'`
   (`make test`); `pytest -q` também roda a mesma suíte.
   Fakes compartilhados vivem em `tests/fakes.py` — nada de rede e nada de
-  Postgres nos testes unitários.
+  Postgres nos testes unitários. Exceção documentada por change quando um
+  teste precisa validar contra infraestrutura real (ex.: migração de
+  schema) — ver `openspec/changes/identity-multichannel/tasks.md`.
+- **Teste end-to-end único:** `tests/test_main_e2e.py`, entrando por
+  `whatbot.main.main()` — a mesma porta que `windmill/f/whatbot/handler.py`
+  chama em produção. Todo change que altera o ciclo
+  contato → identidade → conhecimento → resposta DEVE estendê-lo, nunca
+  duplicá-lo num arquivo E2E paralelo.
 - **Idioma:** código, identificadores e docstrings em inglês; mensagens ao
   usuário final, logs de negócio e documentação em português.
 - **Camadas:** `whatbot/channels/` é a única fronteira de saída. Nenhum módulo de
   domínio deve segurar um cliente de canal concreto — sempre o `ChannelRouter`
   ou os helpers `send_admin` / `send_to_contact`.
 - **Chave de identidade:** hoje `contatos.phone`. A migração para
-  `(canal, external_id)` está planejada (ver capability `instagram`).
+  `(canal, external_id)` — sem unificação de pessoa entre canais nesta fase,
+  `phone` vira `NULL` para contatos não-WhatsApp — está planejada na
+  capability `identity`, change `openspec/changes/identity-multichannel/`.
+  Ordem de dependência entre os changes de Instagram (revisada após auditoria
+  cruzada de todo o fatiamento):
+
+  - **`identity-multichannel`** (fundação: schema, `admin.py`, filtro de
+    teste) e **`instagram-channel-client`** (cliente/parser, não toca
+    `db.py`) começam em paralelo, sem depender um do outro.
+  - **`channel-queue-visibility`** depende só de `identity-multichannel`.
+  - **`instagram-messaging-window`** depende de `identity-multichannel` +
+    `instagram-channel-client` (edita o arquivo que ele cria) +
+    `channel-queue-visibility` (estende a mesma notificação).
+  - **`instagram-webhook-exposure`** é infraestrutura pura, paralela desde o
+    dia 1, sem depender de código.
+  - **`instagram-ingestion-service`** depende de `identity-multichannel`
+    (tabelas `webhook_eventos`/`canal_credenciais`) + `instagram-channel-client`
+    (parser/cliente).
+  - **`instagram-go-live`** depende de tudo acima, inclusive
+    `instagram-webhook-exposure`.
+  - **`instagram-operability`** depende de `instagram-ingestion-service`
+    (os alertas usam código de lá).
+
+  Detalhe e justificativa de cada dependência em cada `proposal.md`.
 
 ## Documentos de referência
 
