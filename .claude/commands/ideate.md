@@ -31,7 +31,9 @@ Execute nesta ordem, sem pular etapas:
    ou se o item for arquiteturalmente sensível (ex: mudança que afeta
    vários módulos do WhatBot — canais, handover, orquestração via Windmill),
    sugira rodar `zen consensus` antes de fechar o plano — não decida sozinho
-   em silêncio.
+   em silêncio. Modelos: veja `.claude/ZEN_MODELS.md` — use a faixa
+   recomendada por padrão; a faixa premium (ex: opus/o3-pro via OpenRouter)
+   só se o usuário pedir explicitamente máximo rigor.
 
 5. **Encerre com um documento único de proposta**, contendo:
    - Resumo da ideia original

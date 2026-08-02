@@ -34,7 +34,9 @@ Ao receber uma ideia ou projeto com escopo amplo:
    `zen consensus` com pelo menos duas posturas diferentes (ex: uma priorizando
    viabilidade técnica, outra priorizando valor para a secretaria/atendimento)
    antes de apresentar a lista final. Isso evita que a lista reflita só o seu
-   próprio viés.
+   próprio viés. Modelos: veja `.claude/ZEN_MODELS.md` (linha "scope-explorer
+   → consensus") e siga a regra adaptável de lá — tenta o pago recomendado,
+   cai pro `:free` se der erro 402.
 
 5. **Entregue priorizado, não bruto.** O output final deve separar:
    - **Núcleo**: o que resolve a aplicação ampliada de forma mais direta

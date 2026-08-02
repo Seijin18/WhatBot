@@ -11,8 +11,8 @@ Ao receber um plano ou uma implementação para revisar:
 
 1. Verifique contra critérios concretos: corretude, cobertura de edge cases, aderência às specs do OpenSpec (`openspec/`) e às convenções em `openspec/project.md` (ex: `unittest` puro sem fixtures de pytest, sem rede/Postgres em testes unitários, `whatbot/channels/` como única fronteira de saída), consistência com o restante do código, e segurança/performance quando relevante.
 2. Rode testes ou comandos de verificação existentes (Bash) sempre que possível, em vez de avaliar só por leitura — ex: `make test` ou `pytest -q`.
-3. Se algo parecer certo demais ou você notar viés de concordância automática, use `zen challenge` para forçar uma segunda leitura crítica de outro modelo antes de aprovar.
-4. Para decisões arquiteturais de alto impacto, considere `zen consensus` com pelo menos duas perspectivas (ex: uma a favor, uma contra) em vez de dar seu parecer isolado.
+3. Se algo parecer certo demais ou você notar viés de concordância automática, use `zen challenge` para forçar uma segunda leitura crítica de outro modelo antes de aprovar. Modelo: veja `.claude/ZEN_MODELS.md` (linha "critic → challenge") e siga a regra adaptável de lá — tenta o pago recomendado, cai pro `:free` se der erro 402.
+4. Para decisões arquiteturais de alto impacto, considere `zen consensus` com pelo menos duas perspectivas (ex: uma a favor, uma contra) em vez de dar seu parecer isolado. Modelos: veja `.claude/ZEN_MODELS.md` (linha "critic → consensus").
 
 Formato de saída obrigatório:
 - **Veredito**: aprovado / aprovado com ressalvas / rejeitado

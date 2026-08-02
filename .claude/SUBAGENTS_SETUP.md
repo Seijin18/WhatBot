@@ -97,6 +97,7 @@ OpenRouter dizendo isso, não falha de conexão do Zen/MCP.
 Já instalados em:
 - `.claude/agents/planner.md`, `critic.md`, `implementer.md`, `scope-explorer.md`
 - `.claude/commands/ideate.md`, `develop.md`
+- `.claude/ZEN_MODELS.md` — qual modelo usar em cada chamada do Zen (seção 4)
 
 Claude Code carrega automaticamente qualquer `.md` dentro dessas pastas.
 
@@ -150,12 +151,16 @@ Teste com:
 - **Codebase Memory**: use para perguntas estruturais ("o que chama essa
   função", "quais rotas existem", "quem usa `ChannelRouter`") em vez de
   deixar o agente fazer grep arquivo por arquivo.
-- **Zen com Kimi/OpenRouter pago**: reserve para consensus/challenge e
-  leitura em massa de código — evite o tier free para não travar em rate
-  limit no meio de uma sessão longa.
-- **Subagentes nativos**: usam a cota do seu plano Pro — bons para o
-  trabalho principal (planejar, implementar, revisar), não para todo
-  ciclo de "segunda opinião" que o Zen resolve mais barato.
+- **Zen**: qual modelo usar em cada chamada (`consensus`, `challenge`, `zen
+  planner`) está mapeado em [`ZEN_MODELS.md`](ZEN_MODELS.md), com preços
+  reais da OpenRouter e fallback automático pro tier `:free` quando a conta
+  não tiver crédito. Não deixe em "auto" — o modo automático tende a
+  escolher os modelos de maior score, que são também os mais caros.
+- **Subagentes nativos**: `planner` e `critic` já rodam em `model: opus`
+  nativo do Claude Code — usam a cota do seu plano Pro, sem custo de
+  OpenRouter. O Zen entra só para pegar a opinião de um modelo de **outra
+  família** (Gemini, GPT, DeepSeek, Kimi) — pagar Opus de novo via
+  OpenRouter dentro do Zen seria redundante com o que o plano Pro já cobre.
 
 ## 5. Checklist rápido
 

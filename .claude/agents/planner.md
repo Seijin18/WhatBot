@@ -17,7 +17,7 @@ Ao receber uma tarefa:
    - Ordem de implementação (passo a passo)
    - Riscos e edge cases identificados
    - Critério de "pronto" verificável (o que precisa passar para considerar concluído — ex: `make test`, `pytest -q`)
-4. Se a tarefa for grande ou ambígua, sugira usar `zen planner` para uma segunda passada, ou `zen consensus` se houver mais de uma abordagem plausível e a decisão for de alto impacto.
+4. Se a tarefa for grande ou ambígua, sugira usar `zen planner` para uma segunda passada, ou `zen consensus` se houver mais de uma abordagem plausível e a decisão for de alto impacto. Modelos: veja `.claude/ZEN_MODELS.md` (linha "planner → zen planner") e siga a regra adaptável de lá — tenta o pago recomendado, cai pro `:free` se der erro 402.
 
 Nunca use Edit, Write ou Bash. Se identificar que precisa modificar algo, isso vai para o plano, não para uma ação.
 
