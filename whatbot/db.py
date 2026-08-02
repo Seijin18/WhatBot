@@ -378,14 +378,21 @@ class Database:
             self._logger.exception("Erro atualizando last_inbound_at: %s", e)
             raise
 
-    def get_last_inbound_at(
-        self, external_id: str, canal: str | None = None
-    ) -> datetime | None:
+    def get_last_inbound_at(self, external_id: str, *, canal: str) -> datetime | None:
         """Look up a contact's `last_inbound_at` by its channel-scoped identity.
 
         Small read accessor meant to be injected into channel clients (e.g.
         `InstagramClient(last_inbound_lookup=...)`), which must not depend on
         `whatbot/db.py` directly (see `openspec/project.md`, "Camadas").
+
+        `canal` is required and keyword-only, deliberately: this signature
+        happens to match `Callable[[str], datetime | None]` if called with a
+        single positional argument, so a naive `last_inbound_lookup=_db.get_last_inbound_at`
+        injection would silently fall back to whatever `normalize_channel(None)`
+        resolves to (WhatsApp) instead of the caller's actual channel — see
+        critic Importante 5 on `instagram-messaging-window`. Prefer
+        `whatbot/channels/instagram.py::instagram_last_inbound_lookup(db)` when
+        wiring an `InstagramClient`.
         """
         canal = normalize_channel(canal)
         self.init_pool()

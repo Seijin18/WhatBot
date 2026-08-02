@@ -46,6 +46,15 @@ _RATE_LIMIT_CODE = 613
 CAUSE_WINDOW_EXPIRED = "window_expired"
 CAUSE_MISSING_HUMAN_AGENT_PERMISSION = "missing_human_agent_permission"
 CAUSE_RATE_LIMITED = "rate_limited"
+# Fail-closed cause for when the window state cannot even be determined (no
+# `last_inbound_lookup` was injected into this client) — distinct from
+# `CAUSE_WINDOW_EXPIRED` (we *know* the window is closed) because the caller
+# may want to react differently to "unknown" vs. "confirmed closed". See
+# `openspec/changes/instagram-messaging-window` Bloqueador 1: the project's
+# convention (`identity-multichannel` Decisão 6) is fail-closed, never
+# fail-open, on a rule whose violation can get the Instagram account
+# suspended.
+CAUSE_WINDOW_CHECK_UNAVAILABLE = "window_check_unavailable"
 
 # `(standard_window, human_agent_window)` — single source of truth shared with
 # `whatbot/queue.py`, see `whatbot/channels/base.py`.
@@ -54,6 +63,12 @@ WINDOW_STANDARD, WINDOW_HUMAN_AGENT = messaging_window(INSTAGRAM)
 _WINDOW_EXPIRED_MESSAGE = (
     "Janela de mensageria do Instagram expirada para este contato "
     "(sem last_inbound_at dentro de 24h, ou de 7 dias com atendimento humano)."
+)
+
+_WINDOW_CHECK_UNAVAILABLE_MESSAGE = (
+    "Não foi possível verificar a janela de mensageria do Instagram para este "
+    "contato (cliente sem last_inbound_lookup configurado) — envio bloqueado "
+    "por segurança (fail-closed)."
 )
 
 
@@ -110,6 +125,29 @@ def _classify_error(response: requests.Response) -> tuple[str | None, str, str |
     return None, message, retry_after
 
 
+def instagram_last_inbound_lookup(db: Any) -> Callable[[str], "datetime | None"]:
+    """Build a `last_inbound_lookup` for `InstagramClient`, fixing `canal=INSTAGRAM`.
+
+    `whatbot/db.py::Database.get_last_inbound_at` requires `canal` as a
+    keyword-only argument precisely so it cannot be injected directly as
+    `Callable[[str], datetime | None]` without deciding which channel it
+    resolves for (see its docstring). This is the intended way to wire it:
+
+        InstagramClient(..., last_inbound_lookup=instagram_last_inbound_lookup(db))
+
+    `db` is typed `Any` (not `whatbot.db.Database`) to avoid this module
+    importing `whatbot/db.py` — it only needs an object with a matching
+    `get_last_inbound_at(external_id, *, canal)` method (e.g. `Database` or a
+    test double), keeping this a small function boundary rather than a
+    concrete dependency.
+    """
+
+    def lookup(external_id: str) -> "datetime | None":
+        return db.get_last_inbound_at(external_id, canal=INSTAGRAM)
+
+    return lookup
+
+
 class InstagramClient:
     """Instagram Direct channel client backed by the Instagram Graph API."""
 
@@ -130,8 +168,10 @@ class InstagramClient:
         self._logger = logging.getLogger("whatbot.instagram_api")
         # Small accessor injected by the caller (e.g. `whatbot/main.py`), never
         # a direct `whatbot/db.py` dependency — keeps this client a pure HTTP
-        # layer. `None` disables the window check entirely (e.g. tests that
-        # don't care about the policy) instead of assuming a default.
+        # layer. `None` means the caller wired the client without a way to
+        # check the window; `_check_messaging_window` fails *closed* in that
+        # case (blocks every send) rather than skipping the check, per the
+        # project's fail-closed convention (see `CAUSE_WINDOW_CHECK_UNAVAILABLE`).
         self._last_inbound_lookup = last_inbound_lookup
         # Injectable clock so window tests don't depend on wall-clock time.
         self._clock = clock or (lambda: datetime.now(timezone.utc))
@@ -140,31 +180,85 @@ class InstagramClient:
         return f"{self.base_url}/{API_VERSION}/me/messages"
 
     def _check_messaging_window(
-        self, to: str, *, human_agent: bool, source: str, contact_id: int | None
+        self,
+        to: str,
+        text: str,
+        *,
+        human_agent: bool,
+        source: str,
+        contact_id: int | None,
     ) -> None:
-        """Raise `ChannelError(cause=CAUSE_WINDOW_EXPIRED)` if `to` is outside the window.
+        """Raise `ChannelError` if `to` is outside the window.
 
-        No-op when no `last_inbound_lookup` was injected (see `__init__`).
+        Fails *closed*, not open: with no `last_inbound_lookup` injected (see
+        `__init__`), this blocks the send with
+        `cause=CAUSE_WINDOW_CHECK_UNAVAILABLE` instead of letting it through —
+        a violation of the messaging window can get the Instagram account
+        suspended, so "I don't know if this is allowed" must behave the same
+        as "this is not allowed".
+
+        Contract: `last_inbound_lookup` MUST return a timezone-aware
+        `datetime` (or `None`). This client does not normalize naive
+        timestamps — subtracting a naive `last_inbound_at` from the
+        (timezone-aware) injected clock raises `TypeError` rather than
+        silently comparing wrong values. `whatbot/db.py::get_last_inbound_at`
+        reads a `TIMESTAMP WITH TIME ZONE` column, so production callers are
+        covered; test doubles must inject aware datetimes too.
         """
         if self._last_inbound_lookup is None:
-            return
+            preview = text[:200] + ("…" if len(text) > 200 else "")
+            self._logger.warning(
+                "Envio recusado: nenhum last_inbound_lookup injetado neste "
+                "InstagramClient, falhando fechado para %s. Mensagem recusada: %r",
+                to,
+                preview,
+            )
+            log_outbound(
+                to,
+                text,
+                canal=INSTAGRAM,
+                source=source,
+                contact_id=contact_id,
+                delivery="failed",
+                error=_WINDOW_CHECK_UNAVAILABLE_MESSAGE,
+                cause=CAUSE_WINDOW_CHECK_UNAVAILABLE,
+            )
+            raise ChannelError(
+                INSTAGRAM,
+                _WINDOW_CHECK_UNAVAILABLE_MESSAGE,
+                retryable=False,
+                cause=CAUSE_WINDOW_CHECK_UNAVAILABLE,
+            )
 
         last_inbound_at = self._last_inbound_lookup(to)
         blocked = last_inbound_at is None
         if not blocked:
             elapsed = self._clock() - last_inbound_at
+            # Inclusive boundary (`<=`), deliberately: exactly 24h00m00s (or
+            # 7d00h00m00s) still counts as inside the window. Chosen for
+            # consistency with `whatbot/queue.py::window_deadline_note`, which
+            # uses the same inclusive comparison to decide which note to show
+            # for the same elapsed time — an admin should never see "window
+            # still open" (queue note) while the client (this check) refuses
+            # to send. A ~1-second edge case is not worth risking that
+            # mismatch for (reviewed in `instagram-messaging-window` critic
+            # pass, kept as-is).
             if elapsed <= WINDOW_STANDARD:
                 return
             if elapsed <= WINDOW_HUMAN_AGENT and human_agent:
                 return
             blocked = True
 
+        preview = text[:200] + ("…" if len(text) > 200 else "")
         self._logger.warning(
-            "Envio recusado: janela de mensageria do Instagram expirada para %s", to
+            "Envio recusado: janela de mensageria do Instagram expirada para "
+            "%s. Mensagem recusada: %r",
+            to,
+            preview,
         )
         log_outbound(
             to,
-            _WINDOW_EXPIRED_MESSAGE,
+            text,
             canal=INSTAGRAM,
             source=source,
             contact_id=contact_id,
@@ -283,7 +377,7 @@ class InstagramClient:
             return {"simulated": True}
 
         self._check_messaging_window(
-            to, human_agent=human_agent, source=source, contact_id=contact_id
+            to, text, human_agent=human_agent, source=source, contact_id=contact_id
         )
 
         blocks = split_text(text)

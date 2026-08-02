@@ -127,6 +127,49 @@ class TestQueueFormat(unittest.TestCase):
         text = format_waiting_list(contacts, "Fila")
         self.assertIn("Instagram", text)
 
+    def test_format_shows_the_response_deadline_for_instagram(self):
+        """IMPORTANTE 4 do critic: `format_waiting_list` alimenta tanto a
+        notificação de lote quanto a de espera prolongada
+        (`check_long_wait_notifications`) e o comando "quem está na fila?" —
+        a espera prolongada é justamente onde o prazo mais importa."""
+        now = datetime.now(timezone.utc)
+        contacts = [
+            WaitingContact(
+                id=1,
+                phone=None,
+                push_name="Maria IG",
+                handover_at=now,
+                handover_motivo="pedido_do_cliente",
+                minutes_waiting=2,
+                prioridade=0,
+                assumido_por=None,
+                canal=INSTAGRAM,
+                external_id="17841400000000000",
+                handle="@maria_ig",
+                last_inbound_at=now - timedelta(hours=1),
+            )
+        ]
+        text = format_waiting_list(contacts, "Fila")
+        self.assertIn("Prazo de resposta", text)
+        self.assertIn("24h", text)
+
+    def test_format_omits_the_deadline_for_whatsapp(self):
+        contacts = [
+            WaitingContact(
+                id=1,
+                phone="5511888888888",
+                push_name="Maria",
+                handover_at=datetime.now(timezone.utc),
+                handover_motivo="pedido_do_cliente",
+                minutes_waiting=5,
+                prioridade=0,
+                assumido_por=None,
+                canal=WHATSAPP,
+            )
+        ]
+        text = format_waiting_list(contacts, "Fila")
+        self.assertNotIn("Prazo de resposta", text)
+
 
 class TestNotifyAssumptionShowsChannel(unittest.TestCase):
     """`notify_assumption` ("atendimento assumido") must name the channel

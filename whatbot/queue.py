@@ -70,6 +70,13 @@ def format_waiting_list(
             f"   {prio} | {contact.minutes_waiting} min | Motivo: {motivo}\n"
             f"   Assumido por: {assumido}"
         )
+        # Prazo de resposta (janela de mensageria do Instagram, ver
+        # `openspec/changes/instagram-messaging-window`) — mais importante
+        # justamente aqui: um contato esperando há tempo é quem tem mais
+        # chance de estar perto do fim da janela.
+        deadline_note = window_deadline_note(contact)
+        if deadline_note:
+            lines.append(f"   Prazo de resposta: {deadline_note}")
         if include_last_message and db is not None:
             last_msg = db.get_last_inbound_message(contact.id)
             if last_msg:

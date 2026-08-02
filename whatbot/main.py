@@ -238,13 +238,19 @@ def process_customer_message(
         logger.exception("Erro DB ao obter/criar contato: %s", e)
         return {"ok": False, "error": "db_error", "detail": str(e)}
 
-    try:
-        # Feeds the Instagram messaging-window check (whatbot/channels/instagram.py);
-        # harmless to record for every channel, kept here since this is the
-        # single canal-agnostic entry point for inbound customer messages.
-        _db.update_contact_last_inbound(contact.id)
-    except Exception:
-        logger.exception("Falha ao registrar last_inbound_at; prosseguindo")
+    if not simulated:
+        try:
+            # Feeds the Instagram messaging-window check (whatbot/channels/instagram.py);
+            # harmless to record for every channel, kept here since this is the
+            # single canal-agnostic entry point for inbound customer messages.
+            # Guarded by `not simulated`: an admin testing the bot via
+            # simulation must never make it look like the real customer just
+            # wrote in — that would reopen a messaging window that is
+            # actually closed and let real sends through that Meta would
+            # refuse/penalize (see critic Bloqueador 3).
+            _db.update_contact_last_inbound(contact.id)
+        except Exception:
+            logger.exception("Falha ao registrar last_inbound_at; prosseguindo")
 
     if not contact.ia_ativa:
         logger.info("IA desativada para %s - early return", contact.label)

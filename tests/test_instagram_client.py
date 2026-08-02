@@ -5,6 +5,7 @@ Follows the same no-network pattern as `tests/test_evolution_client.py`:
 """
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import requests
@@ -23,10 +24,21 @@ IGSID = "17841400000000000"
 
 
 def build_client() -> InstagramClient:
+    """A client wired to always be inside the messaging window.
+
+    This module tests HTTP-level behaviour (payload shape, error
+    classification, retries) that predates the messaging-window policy
+    (`instagram-messaging-window`) and is not itself about that policy —
+    window enforcement is covered by `tests/test_messaging_window.py`. A
+    `last_inbound_lookup` returning "just now" keeps `send_text` fail-closed
+    by default (see Bloqueador 1) without every test here having to think
+    about the window.
+    """
     return InstagramClient(
         access_token="ig-token",
         account_id="ig-account",
         base_url="https://graph.instagram.com/",
+        last_inbound_lookup=lambda to: datetime.now(timezone.utc) - timedelta(minutes=1),
     )
 
 

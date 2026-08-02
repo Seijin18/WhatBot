@@ -5,6 +5,7 @@ must fail — that is the point of the file.
 """
 
 import unittest
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -169,8 +170,15 @@ class TestInstagramClientProtocolAlignment(unittest.TestCase):
     """The Instagram client must satisfy `ChannelClient` the same way WhatsApp's does."""
 
     def setUp(self):
+        # `last_inbound_lookup` keeps the window check a no-op (inside 24h) so
+        # these protocol-shape tests are not entangled with the messaging
+        # window policy (`instagram-messaging-window`, fail-closed by
+        # default) — see `tests/test_messaging_window.py` for that policy.
         self.client = InstagramClient(
-            access_token="ig-token", account_id="ig-account", base_url="https://graph.instagram.com"
+            access_token="ig-token",
+            account_id="ig-account",
+            base_url="https://graph.instagram.com",
+            last_inbound_lookup=lambda to: datetime.now(timezone.utc) - timedelta(minutes=1),
         )
 
     def test_client_satisfies_the_channel_client_protocol(self):

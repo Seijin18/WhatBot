@@ -15,7 +15,11 @@ from unittest.mock import MagicMock, patch
 
 from whatbot.channels import INSTAGRAM, WHATSAPP, ChannelRouter
 from whatbot.channels.base import ChannelError
-from whatbot.channels.instagram import CAUSE_WINDOW_EXPIRED, InstagramClient
+from whatbot.channels.instagram import (
+    CAUSE_WINDOW_CHECK_UNAVAILABLE,
+    CAUSE_WINDOW_EXPIRED,
+    InstagramClient,
+)
 from whatbot.queue import process_new_handover, run_periodic_queue_checks, window_deadline_note
 
 from fakes import FakeClient, FakeDatabase
@@ -101,14 +105,17 @@ class TestMessagingWindowEnforcement(unittest.TestCase):
         self.assertEqual(ctx.exception.cause, CAUSE_WINDOW_EXPIRED)
         self.post.assert_not_called()
 
-    def test_without_an_injected_lookup_the_check_is_a_no_op(self):
-        """Back-compat: a client with no `last_inbound_lookup` never blocks."""
+    def test_without_an_injected_lookup_the_send_is_blocked_fail_closed(self):
+        """Fail-closed: a client with no `last_inbound_lookup` never sends,
+        rather than skipping the check (Bloqueador 1 do critic — o padrão do
+        projeto é falhar travando, nunca falhar liberando)."""
         client = InstagramClient(access_token="ig-token")
 
-        result = client.send_text(IGSID, "Olá")
+        with self.assertRaises(ChannelError) as ctx:
+            client.send_text(IGSID, "Olá")
 
-        self.post.assert_called_once()
-        self.assertEqual(result, {"message_id": "MSG1"})
+        self.assertEqual(ctx.exception.cause, CAUSE_WINDOW_CHECK_UNAVAILABLE)
+        self.post.assert_not_called()
 
     def test_simulated_send_bypasses_the_window_check(self):
         client = build_client(NOW - timedelta(days=30))

@@ -419,5 +419,35 @@ class TestMessagingWindowBlocksAutomaticSend(MainE2ETestCase):
         self.assert_nothing_sent_on(self.wa)
 
 
+class TestLastInboundAtIsPersisted(MainE2ETestCase):
+    """`instagram-messaging-window` task 1.1: a real inbound customer message
+    must feed the Instagram messaging-window check by recording
+    `last_inbound_at`. Without this, `InstagramClient._check_messaging_window`
+    (fed via `whatbot/db.py::get_last_inbound_at`) always sees `None` and
+    fail-closed blocks every send, window or no window."""
+
+    def test_real_customer_message_records_last_inbound_at(self):
+        self.customer_sends("Quais modalidades vocês têm?")
+
+        self.assertIsNotNone(self.db.get_last_inbound_at(CUSTOMER_PHONE, canal=WHATSAPP))
+
+
+class TestAdminSimulationDoesNotTouchLastInboundAt(MainE2ETestCase):
+    """Bloqueador 3: `run_admin_simulation` must never make the system
+    believe the real customer just wrote in — that would reopen a messaging
+    window that is actually closed and let real sends through Meta would
+    refuse/penalize."""
+
+    def test_simulation_does_not_update_last_inbound_at(self):
+        self.db.create_contact(canal=INSTAGRAM, external_id=IGSID, handle="@maria_ig")
+        self.assertIsNone(self.db.get_last_inbound_at(IGSID, canal=INSTAGRAM))
+
+        main_mod.run_admin_simulation(
+            ADMIN_PHONE, IGSID, "Quais modalidades?", canal=INSTAGRAM
+        )
+
+        self.assertIsNone(self.db.get_last_inbound_at(IGSID, canal=INSTAGRAM))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -283,9 +283,7 @@ class FakeDatabase:
     ) -> None:
         self.contacts[contact_id]["last_inbound_at"] = when or _now()
 
-    def get_last_inbound_at(
-        self, external_id: str, canal: str | None = None
-    ) -> Optional[datetime]:
+    def get_last_inbound_at(self, external_id: str, *, canal: str) -> Optional[datetime]:
         row = self._find_by_identity(external_id, canal)
         return row["last_inbound_at"] if row else None
 
