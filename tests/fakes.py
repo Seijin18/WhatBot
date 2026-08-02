@@ -16,8 +16,8 @@ from typing import Any, Dict, List, Optional
 import re
 import unicodedata
 
-from whatbot.channels import WHATSAPP
-from whatbot.db import Contact, MessageRecord, WaitingContact
+from whatbot.channels import WHATSAPP, normalize_channel
+from whatbot.db import Contact, MessageRecord, WaitingContact, resolve_label
 
 
 def _now() -> datetime:
@@ -180,6 +180,9 @@ class FakeDatabase:
             atendido_at=row["atendido_at"],
             handover_motivo=row["handover_motivo"],
             session_state=row["session_state"],
+            canal=row["canal"],
+            external_id=row["external_id"],
+            handle=row["handle"],
         )
 
     def _row_to_waiting(self, row: dict) -> WaitingContact:
@@ -193,35 +196,48 @@ class FakeDatabase:
             minutes_waiting=int(elapsed),
             prioridade=int(row["prioridade"] or 0),
             assumido_por=row["assumido_por"],
+            canal=row["canal"],
+            external_id=row["external_id"],
+            handle=row["handle"],
         )
 
     def _is_waiting_row(self, row: dict) -> bool:
         return row["handover_at"] is not None and row["atendido_at"] is None
 
-    def _find_by_phone(self, phone: str) -> Optional[dict]:
+    def _find_by_identity(self, external_id: str, canal: str | None = None) -> Optional[dict]:
+        canal = normalize_channel(canal)
         for row in self.contacts.values():
-            if row["phone"] == phone:
+            if row["canal"] == canal and row["external_id"] == external_id:
                 return row
         return None
 
     # -- contacts --------------------------------------------------------
 
-    def get_contact_by_phone(self, phone: str) -> Optional[Contact]:
-        row = self._find_by_phone(phone)
+    def get_contact_by_phone(self, phone: str, canal: str | None = None) -> Optional[Contact]:
+        row = self._find_by_identity(phone, canal)
         return self._row_to_contact(row) if row else None
 
     def create_contact(
         self,
-        phone: str,
+        phone: str | None = None,
         status: str = "novo_lead",
         ia_ativa: bool = True,
         push_name: str | None = None,
+        *,
+        canal: str | None = None,
+        external_id: str | None = None,
+        handle: str | None = None,
     ) -> Contact:
+        canal = normalize_channel(canal)
+        external_id = external_id or phone
+        if not external_id:
+            raise ValueError("create_contact requer external_id (ou phone para whatsapp)")
+        stored_phone = external_id if canal == WHATSAPP else None
         contact_id = self._next_contact_id
         self._next_contact_id += 1
         row = {
             "id": contact_id,
-            "phone": phone,
+            "phone": stored_phone,
             "status": status,
             "ia_ativa": ia_ativa,
             "created_at": _now(),
@@ -234,6 +250,9 @@ class FakeDatabase:
             "assumido_por": None,
             "bot_resume_at": None,
             "session_state": {},
+            "canal": canal,
+            "external_id": external_id,
+            "handle": handle,
         }
         self.contacts[contact_id] = row
         return self._row_to_contact(row)
@@ -275,8 +294,8 @@ class FakeDatabase:
         if push_name:
             row["push_name"] = push_name
 
-    def is_waiting(self, phone: str) -> bool:
-        row = self._find_by_phone(phone)
+    def is_waiting(self, phone: str, canal: str | None = None) -> bool:
+        row = self._find_by_identity(phone, canal)
         return bool(row and self._is_waiting_row(row))
 
     def get_waiting_contacts(self) -> List[WaitingContact]:
@@ -284,8 +303,8 @@ class FakeDatabase:
         waiting.sort(key=lambda r: (-int(r["prioridade"] or 0), r["handover_at"]))
         return [self._row_to_waiting(r) for r in waiting]
 
-    def get_contact_waiting(self, phone: str) -> WaitingContact | None:
-        row = self._find_by_phone(phone)
+    def get_contact_waiting(self, phone: str, canal: str | None = None) -> WaitingContact | None:
+        row = self._find_by_identity(phone, canal)
         if row and self._is_waiting_row(row):
             return self._row_to_waiting(row)
         return None
@@ -333,6 +352,8 @@ class FakeDatabase:
                 "prioridade": int(row["prioridade"] or 0),
                 "assumido_por": assumido_por,
                 "motivo": row["handover_motivo"],
+                "canal": row["canal"],
+                "external_id": row["external_id"],
             }
         )
 
@@ -342,8 +363,10 @@ class FakeDatabase:
         reativar_bot: bool = False,
         assumido_por: str | None = None,
         schedule_resume_hours: int | None = None,
+        *,
+        canal: str | None = None,
     ) -> bool:
-        row = self._find_by_phone(phone)
+        row = self._find_by_identity(phone, canal)
         if not row or not self._is_waiting_row(row):
             return False
         self._archive_handover(row, assumido_por)
@@ -379,23 +402,26 @@ class FakeDatabase:
         count = 0
         for contact in self.get_waiting_contacts():
             if self.mark_attended(
-                contact.phone,
+                contact.external_id,
                 reativar_bot=reativar_bot,
                 assumido_por=assumido_por,
                 schedule_resume_hours=schedule_resume_hours,
+                canal=contact.canal,
             ):
                 count += 1
         return count
 
-    def assumir_contato(self, phone: str, admin_phone: str) -> WaitingContact | None:
-        row = self._find_by_phone(phone)
+    def assumir_contato(
+        self, phone: str, admin_phone: str, *, canal: str | None = None
+    ) -> WaitingContact | None:
+        row = self._find_by_identity(phone, canal)
         if not row or not self._is_waiting_row(row):
             return None
         row["assumido_por"] = admin_phone
         return self._row_to_waiting(row)
 
-    def reativar_bot(self, phone: str) -> bool:
-        row = self._find_by_phone(phone)
+    def reativar_bot(self, phone: str, *, canal: str | None = None) -> bool:
+        row = self._find_by_identity(phone, canal)
         if not row:
             return False
         row.update(
@@ -413,13 +439,18 @@ class FakeDatabase:
         return True
 
     def process_auto_reactivations(self) -> list[str]:
+        """Mirrors `Database.process_auto_reactivations`: returns labels, not
+        raw `phone` (which is `None` for non-WhatsApp contacts)."""
         reactivated = []
         for row in self.contacts.values():
             resume_at = row["bot_resume_at"]
             if not row["ia_ativa"] and resume_at is not None and resume_at <= _now():
                 row["ia_ativa"] = True
                 row["bot_resume_at"] = None
-                reactivated.append(row["phone"])
+                label = resolve_label(
+                    row["push_name"], row["handle"], row["external_id"] or row["phone"]
+                )
+                reactivated.append(label)
         return reactivated
 
     # -- stats -----------------------------------------------------------
@@ -521,8 +552,14 @@ class FakeDatabase:
     def search_contacts_for_admin(self, query: str) -> list[dict]:
         phone = re.sub(r"\D", "", query)
         if phone and len(phone) >= 8:
+            # Mirrors `Database.search_contacts_for_admin`: also match
+            # `external_id` directly, since non-WhatsApp contacts never
+            # populate `phone` (see design.md, Decisão 3).
             matches = [
-                r for r in self.contacts.values() if phone[-8:] in r["phone"]
+                r
+                for r in self.contacts.values()
+                if (r["phone"] and phone[-8:] in r["phone"])
+                or (r["external_id"] and phone[-8:] in r["external_id"])
             ]
         else:
             folded = unicodedata.normalize("NFKD", query.lower())
@@ -530,7 +567,11 @@ class FakeDatabase:
             matches = [
                 r
                 for r in self.contacts.values()
-                if term and term in (r["push_name"] or "").lower()
+                if term
+                and (
+                    term in (r["push_name"] or "").lower()
+                    or term in (r["handle"] or "").lower()
+                )
             ]
         matches.sort(key=lambda r: r["created_at"], reverse=True)
         return [
@@ -540,6 +581,10 @@ class FakeDatabase:
                 "push_name": r["push_name"],
                 "ia_ativa": r["ia_ativa"],
                 "in_queue": self._is_waiting_row(r),
+                "canal": r["canal"],
+                "external_id": r["external_id"],
+                "handle": r["handle"],
+                "label": resolve_label(r["push_name"], r["handle"], r["external_id"] or r["phone"]),
             }
             for r in matches[:5]
         ]

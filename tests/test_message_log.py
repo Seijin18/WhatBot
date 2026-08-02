@@ -38,9 +38,23 @@ class TestMessageLog(unittest.TestCase):
         entry = json.loads(self.log_path.read_text(encoding="utf-8").strip())
         self.assertEqual(entry["direction"], "in")
         self.assertEqual(entry["phone"], "5511999999999")
+        self.assertEqual(entry["canal"], "whatsapp")
         self.assertEqual(entry["source"], "customer")
         self.assertIn("Olá", entry["text"])
         self.assertTrue(any("dir=in" in line for line in captured.output))
+        self.assertTrue(any("canal=whatsapp" in line for line in captured.output))
+
+    def test_log_inbound_records_a_non_whatsapp_canal(self) -> None:
+        log_inbound(
+            "17841400000000000",
+            "Olá pelo Instagram",
+            canal="instagram",
+            contact_id=1,
+        )
+
+        entry = json.loads(self.log_path.read_text(encoding="utf-8").strip())
+        self.assertEqual(entry["canal"], "instagram")
+        self.assertEqual(entry["phone"], "17841400000000000")
 
     def test_log_outbound_truncates_long_text(self) -> None:
         long_text = "x" * 200
@@ -49,12 +63,14 @@ class TestMessageLog(unittest.TestCase):
         entry = json.loads(self.log_path.read_text(encoding="utf-8").strip())
         self.assertEqual(entry["text_len"], 200)
         self.assertIn("… (+100 chars)", entry["text"])
+        self.assertEqual(entry["canal"], "whatsapp")
 
     def test_log_llm_turn_records_fallback(self) -> None:
         log_llm_turn(
             "5511999999999",
             "Quanto custa?",
             "Consulte a secretaria.",
+            canal="instagram",
             used_fallback=True,
             llm_provider="ollama",
             llm_model="qwen2.5:7b-instruct-q4_K_M",
@@ -64,6 +80,7 @@ class TestMessageLog(unittest.TestCase):
         self.assertEqual(entry["kind"], "llm")
         self.assertTrue(entry["used_fallback"])
         self.assertEqual(entry["llm_provider"], "ollama")
+        self.assertEqual(entry["canal"], "instagram")
 
     def test_no_file_when_path_unset(self) -> None:
         os.environ["WHATBOT_MESSAGE_LOG_PATH"] = ""

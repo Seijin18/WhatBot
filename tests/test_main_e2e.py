@@ -207,6 +207,79 @@ class TestAdminCommands(MainE2ETestCase):
         self.assertEqual(self.wa.sent[-1]["to"], ADMIN_PHONE)
         self.assertEqual(self.wa.sent[-1]["source"], "admin")
 
+    def test_admin_assumes_and_completes_a_non_whatsapp_contact(self):
+        """`admin.py` must resolve `(canal, external_id)`, not just `phone`
+        (design.md, Decisão 4) — the secretariat still has commands for a
+        contact that never has a `phone`."""
+        contact = self.db.create_contact(
+            canal=INSTAGRAM, external_id=IGSID, push_name="Joana IG"
+        )
+        self.db.enroll_handover(contact.id, motivo="pedido_do_cliente")
+
+        assume_result = main_mod.main(
+            evolution_payload(ADMIN_PHONE, "assumo a Joana", push_name="Secretaria")
+        )
+        self.assertTrue(assume_result["admin_command"])
+        self.assertIn("assumiu", assume_result["reply"])
+
+        waiting = self.db.get_contact_waiting(IGSID, canal=INSTAGRAM)
+        self.assertIsNotNone(waiting)
+        self.assertEqual(waiting.assumido_por, ADMIN_PHONE)
+
+        complete_result = main_mod.main(
+            evolution_payload(ADMIN_PHONE, "finalizei com a Joana")
+        )
+        self.assertTrue(complete_result["admin_command"])
+        self.assertIn("atendido", complete_result["reply"])
+        self.assertIsNone(self.db.get_contact_waiting(IGSID, canal=INSTAGRAM))
+        self.assert_nothing_sent_on(self.ig)
+
+    def test_admin_assumes_and_completes_a_contact_with_only_a_handle(self):
+        """The realistic shape of a fresh Instagram contact: no `push_name`
+        at all, only `handle` — the secretariat must still be able to find
+        and act on it by handle (design.md, Bloqueador 2)."""
+        contact = self.db.create_contact(
+            canal=INSTAGRAM, external_id=IGSID, handle="@joana_ig"
+        )
+        self.db.enroll_handover(contact.id, motivo="pedido_do_cliente")
+
+        assume_result = main_mod.main(
+            evolution_payload(ADMIN_PHONE, "assumo a joana_ig", push_name="Secretaria")
+        )
+        self.assertTrue(assume_result["admin_command"])
+        self.assertIn("assumiu", assume_result["reply"])
+
+        waiting = self.db.get_contact_waiting(IGSID, canal=INSTAGRAM)
+        self.assertIsNotNone(waiting)
+        self.assertEqual(waiting.assumido_por, ADMIN_PHONE)
+
+        complete_result = main_mod.main(
+            evolution_payload(ADMIN_PHONE, "finalizei com a joana_ig")
+        )
+        self.assertTrue(complete_result["admin_command"])
+        self.assertIn("atendido", complete_result["reply"])
+        self.assertIsNone(self.db.get_contact_waiting(IGSID, canal=INSTAGRAM))
+        self.assert_nothing_sent_on(self.ig)
+
+
+class TestCrossChannelIdentity(MainE2ETestCase):
+    """Requirement 'Identidade do contato por canal', cenário 'Mesma
+    identidade externa em canais diferentes'."""
+
+    def test_same_external_id_in_different_channels_does_not_collide(self):
+        same_id = "5511999999999"
+        wa_contact = self.db.create_contact(canal=WHATSAPP, external_id=same_id)
+        ig_contact = self.db.create_contact(canal=INSTAGRAM, external_id=same_id)
+
+        self.assertNotEqual(wa_contact.id, ig_contact.id)
+        self.assertEqual(wa_contact.phone, same_id)
+        self.assertIsNone(ig_contact.phone)
+
+        found_wa = self.db.get_contact_by_phone(same_id, canal=WHATSAPP)
+        found_ig = self.db.get_contact_by_phone(same_id, canal=INSTAGRAM)
+        self.assertEqual(found_wa.id, wa_contact.id)
+        self.assertEqual(found_ig.id, ig_contact.id)
+
 
 class TestStaffOutgoing(MainE2ETestCase):
     def test_staff_reply_auto_completes_the_queue_entry(self):

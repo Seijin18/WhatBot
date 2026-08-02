@@ -1,10 +1,13 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+from whatbot.channels import INSTAGRAM
 from whatbot.priority import calcular_prioridade_handover, prioridade_label
 from whatbot.queue import format_waiting_list, normalize_phone
 from whatbot.db import WaitingContact
 from whatbot.webhook import parse_outgoing_staff_message
+
+from fakes import FakeDatabase
 
 
 class TestPriority(unittest.TestCase):
@@ -53,6 +56,51 @@ class TestQueueFormat(unittest.TestCase):
         text = format_waiting_list(contacts, "Fila")
         self.assertIn("ALTA", text)
         self.assertIn("5511777777777", text)
+
+    def test_format_tolerates_contact_without_phone(self):
+        """Non-WhatsApp contacts have `phone=None` (design.md, Decisão 3)."""
+        contacts = [
+            WaitingContact(
+                id=1,
+                phone=None,
+                push_name="Maria IG",
+                handover_at=datetime.now(timezone.utc),
+                handover_motivo="pedido_do_cliente",
+                minutes_waiting=2,
+                prioridade=0,
+                assumido_por=None,
+                canal=INSTAGRAM,
+                external_id="17841400000000000",
+                handle="@maria_ig",
+            )
+        ]
+        text = format_waiting_list(contacts, "Fila")
+        self.assertIn("Maria IG", text)
+        # Identity chip uses the unified precedence (handle -> external_id,
+        # see whatbot/db.py:resolve_label) — handle wins here.
+        self.assertIn("@maria_ig", text)
+
+
+class TestProcessAutoReactivations(unittest.TestCase):
+    """`process_auto_reactivations` with `phone=None` must not break
+    (design.md, Importante 6 / tasks.md 6.5) — a real call, not just a name
+    referenced from `fakes.py`."""
+
+    def test_reactivates_a_non_whatsapp_contact_without_phone(self):
+        db = FakeDatabase()
+        contact = db.create_contact(
+            canal=INSTAGRAM, external_id="17841400000000000", handle="@maria_ig"
+        )
+        db.contacts[contact.id]["ia_ativa"] = False
+        db.contacts[contact.id]["bot_resume_at"] = datetime.now(timezone.utc) - timedelta(
+            hours=1
+        )
+
+        reactivated = db.process_auto_reactivations()
+
+        self.assertEqual(reactivated, ["@maria_ig"])
+        self.assertTrue(db.contacts[contact.id]["ia_ativa"])
+        self.assertIsNone(db.contacts[contact.id]["bot_resume_at"])
 
 
 if __name__ == "__main__":

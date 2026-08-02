@@ -1,4 +1,4 @@
-.PHONY: up up-d down logs ps test chat chat-test
+.PHONY: up up-d down logs ps test test-migration chat chat-test
 
 COMPOSE = docker compose
 PROFILES = --profile windmill
@@ -26,6 +26,12 @@ ps:
 
 test:
 	python -m unittest discover -s tests -p 'test_*.py' -v
+
+# Teste de migração de schema contra Postgres real (fora de `make test`).
+# Requer WHATBOT_TEST_DSN apontando para o serviço `db` do docker-compose.
+# Ex.: WHATBOT_TEST_DSN=postgresql://whatbot:whatbot@localhost:5432/whatbot make test-migration
+test-migration:
+	python -m pytest tests/integration/test_identity_migration.py -v
 
 # Teste local do bot (simulado, sem WhatsApp). Ex.: make chat-test MSG='Quais modalidades?'
 chat-test:
