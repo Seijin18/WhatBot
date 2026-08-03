@@ -9,6 +9,7 @@ These are the only tests that exercise the `whatsapp` -> `router` rename across
 reachable only with a live Postgres.
 """
 
+import itertools
 import os
 import unittest
 from unittest.mock import patch
@@ -29,9 +30,19 @@ BASE_ENV = {
     "GEMINI_API_KEY": "test-key",
 }
 
+# Unique-by-default message id per `evolution_payload()` call, so unrelated
+# tests never collide on the webhook-idempotency check (instagram-ingestion-
+# service) just because they share the fixture's old hardcoded "MSG1". Tests
+# that specifically exercise the duplicate path pass `msg_id=` explicitly.
+_msg_id_counter = itertools.count(1)
 
-def evolution_payload(phone: str, text: str, push_name: str = "Maria") -> dict:
+
+def evolution_payload(
+    phone: str, text: str, push_name: str = "Maria", msg_id: str | None = None
+) -> dict:
     """A customer message exactly as the Evolution API webhook delivers it."""
+    if msg_id is None:
+        msg_id = f"MSG{next(_msg_id_counter)}"
     return {
         "event": "messages.upsert",
         "instance": "whatbot",
@@ -39,7 +50,7 @@ def evolution_payload(phone: str, text: str, push_name: str = "Maria") -> dict:
             "key": {
                 "remoteJid": f"{phone}@s.whatsapp.net",
                 "fromMe": False,
-                "id": "MSG1",
+                "id": msg_id,
             },
             "pushName": push_name,
             "message": {"conversation": text},
@@ -396,6 +407,47 @@ class TestModelUnavailable(MainE2ETestCase):
         self.assert_nothing_sent_on(self.wa)
 
 
+class TestSendFailureHealthAlertFiresFromTheRealSendPath(MainE2ETestCase):
+    """Critic BLOQUEADOR 1: `SendFailureMonitor`/`alert_fail_streak` had an
+    isolated test in `tests/test_instagram_health.py`, but nothing in the
+    real send path ever called them — the alert never fired in production.
+    This drives failures through `process_customer_message()` (the actual
+    Instagram send point in `whatbot/main.py`), not through
+    `instagram_health` directly, so it breaks if the wiring is removed."""
+
+    def test_reaching_the_threshold_alerts_the_admin_exactly_once(self):
+        self.ig.raise_error = ChannelError(
+            INSTAGRAM, "instabilidade simulada", retryable=True
+        )
+        with patch.dict(os.environ, {"IG_ALERT_FAIL_STREAK": "3"}):
+            for i in range(3):
+                result = main_mod.process_customer_message(
+                    IGSID, f"Mensagem {i}", canal=INSTAGRAM
+                )
+                self.assertFalse(result["ok"])
+
+        # Only on the third (threshold-crossing) failure does the admin get
+        # alerted — via WhatsApp, the admin channel, regardless of which
+        # channel is failing.
+        self.assertEqual(len(self.wa.sent), 1)
+        self.assertIn("3", self.wa.sent[0]["text"])
+        self.assertEqual(self.wa.sent[0]["to"], ADMIN_PHONE)
+
+    def test_a_success_in_between_resets_the_streak(self):
+        with patch.dict(os.environ, {"IG_ALERT_FAIL_STREAK": "2"}):
+            self.ig.raise_error = ChannelError(INSTAGRAM, "falha", retryable=True)
+            main_mod.process_customer_message(IGSID, "Oi", canal=INSTAGRAM)
+
+            self.ig.raise_error = None
+            main_mod.process_customer_message(IGSID, "Oi de novo", canal=INSTAGRAM)
+
+            self.ig.raise_error = ChannelError(INSTAGRAM, "falha", retryable=True)
+            main_mod.process_customer_message(IGSID, "Mais uma", canal=INSTAGRAM)
+
+        # Only one failure since the reset — never reached the threshold of 2.
+        self.assertEqual(self.wa.sent, [])
+
+
 class TestMessagingWindowBlocksAutomaticSend(MainE2ETestCase):
     """`instagram-messaging-window`: a send refused for being outside the
     messaging window must never surface as an error to the customer — the
@@ -447,6 +499,240 @@ class TestAdminSimulationDoesNotTouchLastInboundAt(MainE2ETestCase):
         )
 
         self.assertIsNone(self.db.get_last_inbound_at(IGSID, canal=INSTAGRAM))
+
+
+class TestAdminSimulationDoesNotCorruptTheRealContact(MainE2ETestCase):
+    """A critic reviewing `instagram-messaging-window` found that
+    `run_admin_simulation` corrupted the real contact whenever `sim_phone`
+    collided with an existing customer: `push_name` was overwritten with
+    "Simulado por ...", and the simulated exchange was written into that
+    contact's real message history / session state. `enroll_handover` even
+    deactivated the bot and enrolled the real contact in the secretariat
+    queue when the simulated text triggered a handover. None of that may
+    leave a trace on the real contact, mirroring the `last_inbound_at` fix
+    above."""
+
+    def test_push_name_of_existing_contact_is_not_overwritten(self):
+        self.db.create_contact(
+            canal=INSTAGRAM, external_id=IGSID, handle="@maria_ig", push_name="Maria Real"
+        )
+
+        main_mod.run_admin_simulation(
+            ADMIN_PHONE, IGSID, "Quais modalidades?", canal=INSTAGRAM
+        )
+
+        contact = self.db.get_contact_by_phone(IGSID, canal=INSTAGRAM)
+        self.assertEqual(contact.push_name, "Maria Real")
+
+    def test_simulation_does_not_write_to_the_real_message_history(self):
+        self.db.create_contact(
+            canal=INSTAGRAM, external_id=IGSID, handle="@maria_ig", push_name="Maria Real"
+        )
+
+        main_mod.run_admin_simulation(
+            ADMIN_PHONE, IGSID, "Quais modalidades?", canal=INSTAGRAM
+        )
+
+        contact = self.db.get_contact_by_phone(IGSID, canal=INSTAGRAM)
+        self.assertEqual(self.db.get_recent_messages(contact.id), [])
+
+    def test_simulation_does_not_persist_session_state(self):
+        self.db.create_contact(
+            canal=INSTAGRAM, external_id=IGSID, handle="@maria_ig", push_name="Maria Real"
+        )
+
+        main_mod.run_admin_simulation(
+            ADMIN_PHONE, IGSID, "Quais modalidades?", canal=INSTAGRAM
+        )
+
+        contact = self.db.get_contact_by_phone(IGSID, canal=INSTAGRAM)
+        self.assertEqual(contact.session_state, {})
+
+    def test_simulated_handover_does_not_enroll_the_real_contact(self):
+        self.db.create_contact(
+            canal=INSTAGRAM, external_id=IGSID, handle="@maria_ig", push_name="Maria Real"
+        )
+
+        main_mod.run_admin_simulation(
+            ADMIN_PHONE, IGSID, "quero falar com a secretaria", canal=INSTAGRAM
+        )
+
+        contact = self.db.get_contact_by_phone(IGSID, canal=INSTAGRAM)
+        self.assertTrue(contact.ia_ativa)
+        self.assertIsNone(contact.handover_at)
+        self.assertEqual(self.db.get_recent_messages(contact.id), [])
+
+
+class TestWebhookIdempotency(MainE2ETestCase):
+    """`instagram-ingestion-service`, Requirement "Idempotência de entrega de
+    webhook": a reentrega do mesmo `message_id` não pode gerar segunda
+    resposta. Verificado aqui na porta `main()`, sem precisar do serviço
+    FastAPI de pé — fecha o bloqueio de raiz de forma independente do
+    transporte HTTP (WhatsApp síncrono ou `whatbot/ingress.py` para o
+    Instagram usam a mesma checagem)."""
+
+    def test_second_delivery_of_the_same_message_id_is_discarded(self):
+        payload = evolution_payload(
+            CUSTOMER_PHONE, "Quais modalidades vocês têm?", msg_id="dup-1"
+        )
+
+        first = main_mod.main(payload)
+        second = main_mod.main(payload)
+
+        self.assertTrue(first["ok"])
+        self.assertTrue(first.get("sent"))
+        self.assertEqual(len(self.wa.sent), 1)
+
+        self.assertTrue(second["ok"])
+        self.assertTrue(second.get("ignored"))
+        self.assertEqual(second.get("reason"), "duplicate_message_id")
+        # Nothing new went out on the second delivery.
+        self.assertEqual(len(self.wa.sent), 1)
+
+    def test_different_message_ids_are_both_processed(self):
+        main_mod.main(
+            evolution_payload(CUSTOMER_PHONE, "Oi", msg_id="a-1")
+        )
+        main_mod.main(
+            evolution_payload(CUSTOMER_PHONE, "Quais modalidades?", msg_id="a-2")
+        )
+
+        self.assertEqual(len(self.wa.sent), 2)
+
+
+class TestIdempotencyRollbackOnFailure(MainE2ETestCase):
+    """Critic BLOQUEADOR 2: idempotência gravada antes de processar, sem
+    reverter em caso de falha, perdia a mensagem para sempre — a reentrega da
+    Meta era descartada como duplicata mesmo sem o cliente ter recebido
+    resposta. A primeira entrega falha *depois* que o evento já foi
+    registrado (aqui, no envio real ao canal); a segunda entrega do mesmo
+    `message_id` deve ser reprocessada, não descartada."""
+
+    def test_second_delivery_is_reprocessed_after_the_first_fails_mid_flow(self):
+        payload = evolution_payload(
+            CUSTOMER_PHONE, "Quais modalidades vocês têm?", msg_id="fail-then-retry"
+        )
+        self.wa.raise_error = ChannelError(
+            WHATSAPP, "instabilidade simulada", cause="simulated", retryable=True
+        )
+
+        first = main_mod.main(payload)
+
+        self.assertFalse(first["ok"])
+        self.assertEqual(first.get("error"), "send_failed")
+        self.assertEqual(self.wa.sent, [])
+
+        # The customer never actually got a response — the retry must be
+        # processed again, not silently discarded.
+        self.wa.raise_error = None
+        second = main_mod.main(payload)
+
+        self.assertTrue(second["ok"])
+        self.assertTrue(second.get("sent"))
+        self.assertNotEqual(second.get("reason"), "duplicate_message_id")
+        self.assertEqual(len(self.wa.sent), 1)
+
+
+class TestNoDuplicateSendWhenPostSendBookkeepingFails(MainE2ETestCase):
+    """Critic (novo bloqueador, pós-correção do BLOQUEADOR 2): o rollback de
+    idempotência em `main()` reage a QUALQUER `ok: False` de
+    `process_customer_message`, inclusive quando a mensagem já foi entregue
+    de verdade ao cliente e só o bookkeeping pós-envio (`_db.save_message`)
+    falhou. Sem proteção, isso derruba o retorno para `ok: False`, `main()`
+    desfaz o registro de idempotência, e a reentrega do mesmo `message_id`
+    reprocessa do zero — reenviando a resposta ao cliente real pela segunda
+    vez. A primeira entrega deve retornar `ok: True` apesar da falha de
+    bookkeeping, então a segunda entrega do mesmo `message_id` deve ser
+    descartada como duplicata (nenhum envio adicional ao canal)."""
+
+    def test_second_delivery_does_not_resend_after_post_send_save_message_fails(self):
+        payload = evolution_payload(
+            CUSTOMER_PHONE,
+            "Quais modalidades vocês têm?",
+            msg_id="send-ok-bookkeeping-fails",
+        )
+
+        original_save_message = self.db.save_message
+        calls = {"n": 0}
+
+        def flaky_save_message(contact_id, direction, text):
+            calls["n"] += 1
+            # Let the inbound save (direction="in") succeed so the flow
+            # reaches the real send; blow up only on the post-send bookkeeping
+            # write (direction="out") of this first delivery.
+            if direction == "out" and calls["n"] == 2:
+                raise RuntimeError("soneca de conexão do Postgres simulada")
+            return original_save_message(contact_id, direction, text)
+
+        self.db.save_message = flaky_save_message
+
+        first = main_mod.main(payload)
+
+        # The reply already reached the real customer — a bookkeeping hiccup
+        # must not be reported as a delivery failure.
+        self.assertTrue(first["ok"])
+        self.assertTrue(first.get("sent"))
+        self.assertEqual(len(self.wa.sent), 1)
+
+        second = main_mod.main(payload)
+
+        # Same `message_id` redelivered: must be discarded as a duplicate,
+        # never reprocessed/resent, since the first delivery already
+        # succeeded from the customer's point of view.
+        self.assertTrue(second["ok"])
+        self.assertEqual(second.get("reason"), "duplicate_message_id")
+        self.assertEqual(len(self.wa.sent), 1)
+
+
+class TestNoDuplicateHandoverSendWhenPostSendBookkeepingFails(MainE2ETestCase):
+    """Mesma classe de bug do teste acima, no caminho de handover
+    (`whatbot/domain.py::executar_handover_para_secretaria`): a confirmação de
+    handover já foi entregue ao cliente real quando o bookkeeping pós-envio
+    (`db.save_message`/`db.enroll_handover`) falha. Sem proteção, isso
+    derrubava o retorno para `ok: False`, `main()` desfazia o registro de
+    idempotência, e a reentrega do mesmo `message_id` reprocessava do zero —
+    reenviando a confirmação de handover ao cliente real pela segunda vez."""
+
+    def test_second_delivery_does_not_resend_handover_after_post_send_save_message_fails(
+        self,
+    ):
+        payload = evolution_payload(
+            CUSTOMER_PHONE,
+            "quero falar com a secretaria",
+            msg_id="handover-ok-bookkeeping-fails",
+        )
+
+        original_save_message = self.db.save_message
+        calls = {"n": 0}
+
+        def flaky_save_message(contact_id, direction, text):
+            calls["n"] += 1
+            # Let the inbound save (direction="in") succeed so the flow
+            # reaches the real send; blow up only on the post-send bookkeeping
+            # write (direction="out", inside executar_handover_para_secretaria)
+            # of this first delivery.
+            if direction == "out" and calls["n"] == 2:
+                raise RuntimeError("soneca de conexão do Postgres simulada")
+            return original_save_message(contact_id, direction, text)
+
+        self.db.save_message = flaky_save_message
+
+        first = main_mod.main(payload)
+
+        # The handover confirmation already reached the real customer — a
+        # bookkeeping hiccup must not be reported as a delivery failure.
+        self.assertTrue(first["ok"])
+        self.assertTrue(first.get("handed_to_human"))
+        self.assertEqual(len(self.wa.sent), 1)
+
+        second = main_mod.main(payload)
+
+        # Same `message_id` redelivered: must be discarded as a duplicate,
+        # never reprocessed/resent, since the first delivery already
+        # succeeded from the customer's point of view.
+        self.assertTrue(second["ok"])
+        self.assertEqual(second.get("reason"), "duplicate_message_id")
+        self.assertEqual(len(self.wa.sent), 1)
 
 
 if __name__ == "__main__":

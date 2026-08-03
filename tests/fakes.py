@@ -17,7 +17,7 @@ import re
 import unicodedata
 
 from whatbot.channels import WHATSAPP, normalize_channel
-from whatbot.db import Contact, MessageRecord, WaitingContact, resolve_label
+from whatbot.db import ChannelCredential, Contact, MessageRecord, WaitingContact, resolve_label
 
 
 def _now() -> datetime:
@@ -160,6 +160,11 @@ class FakeDatabase:
         self._next_contact_id = 1
         self._next_message_id = 1
         self.schema_ensured = False
+        # instagram-ingestion-service: mirrors `webhook_eventos` / `canal_credenciais`.
+        self.webhook_events: Dict[tuple, datetime] = {}
+        self.channel_credentials: Dict[str, dict] = {}
+        # Mirrors `canal_envio_falhas` (critic BLOQUEADOR 1: persisted streak).
+        self.send_fail_streaks: Dict[str, int] = {}
 
     # -- infra -----------------------------------------------------------
 
@@ -605,3 +610,66 @@ class FakeDatabase:
             }
             for r in matches[:5]
         ]
+
+    # -- webhook idempotency ----------------------------------------------
+
+    def record_webhook_event(self, canal: str, message_id: str) -> bool:
+        canal = normalize_channel(canal)
+        key = (canal, message_id)
+        if key in self.webhook_events:
+            return False
+        self.webhook_events[key] = _now()
+        return True
+
+    def get_last_webhook_event_at(self, canal: str | None = None) -> Optional[datetime]:
+        canal = normalize_channel(canal)
+        times = [t for (c, _mid), t in self.webhook_events.items() if c == canal]
+        return max(times) if times else None
+
+    def purge_old_webhook_events(self, older_than_days: int = 7) -> int:
+        cutoff = _now() - timedelta(days=older_than_days)
+        stale = [k for k, t in self.webhook_events.items() if t < cutoff]
+        for k in stale:
+            del self.webhook_events[k]
+        return len(stale)
+
+    def delete_webhook_event(self, canal: str, message_id: str) -> None:
+        canal = normalize_channel(canal)
+        self.webhook_events.pop((canal, message_id), None)
+
+    # -- send-failure streak ----------------------------------------------
+
+    def increment_send_fail_streak(self, canal: str) -> int:
+        canal = normalize_channel(canal)
+        self.send_fail_streaks[canal] = self.send_fail_streaks.get(canal, 0) + 1
+        return self.send_fail_streaks[canal]
+
+    def reset_send_fail_streak(self, canal: str) -> None:
+        canal = normalize_channel(canal)
+        self.send_fail_streaks[canal] = 0
+
+    # -- channel credentials ------------------------------------------------
+
+    def upsert_channel_credential(
+        self,
+        canal: str,
+        access_token: str,
+        *,
+        account_id: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> None:
+        canal = normalize_channel(canal)
+        self.channel_credentials[canal] = {
+            "canal": canal,
+            "account_id": account_id,
+            "access_token": access_token,
+            "expires_at": expires_at,
+            "refreshed_at": _now(),
+        }
+
+    def get_channel_credential(self, canal: str) -> Optional[ChannelCredential]:
+        canal = normalize_channel(canal)
+        row = self.channel_credentials.get(canal)
+        if not row:
+            return None
+        return ChannelCredential(**row)
