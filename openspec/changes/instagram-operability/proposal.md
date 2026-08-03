@@ -35,3 +35,14 @@ change cobre a parte de processo (treinamento, runbook, alertas).
 - Bloqueado por: `instagram-ingestion-service` (os alertas dependem de
   código já existir); as partes de documentação podem ser escritas em
   paralelo com `instagram-go-live`
+
+## Adiado — retomar após smoke test
+
+Execução substituída, para a primeira validação real, por
+`instagram-live-smoke-test`. O código dos alertas de saúde já existe e
+está testado (`whatbot/instagram_health.py`, chamado do caminho real de
+envio) — o que falta aqui é só a camada operacional (runbook, treinamento
+da secretaria, rollback testado), que só vale a pena formalizar depois que
+o smoke test confirmar o esqueleto funcionando. Retomar quando houver uso
+real (mesmo que pequeno) o suficiente para o runbook refletir problemas
+reais, não hipotéticos.

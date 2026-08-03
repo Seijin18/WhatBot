@@ -54,15 +54,21 @@ fila que a secretaria opera por comandos em linguagem natural.
   - **`instagram-messaging-window`** depende de `identity-multichannel` +
     `instagram-channel-client` (edita o arquivo que ele cria) +
     `channel-queue-visibility` (estende a mesma notificação).
-  - **`instagram-webhook-exposure`** é infraestrutura pura, paralela desde o
-    dia 1, sem depender de código.
   - **`instagram-ingestion-service`** depende de `identity-multichannel`
     (tabelas `webhook_eventos`/`canal_credenciais`) + `instagram-channel-client`
     (parser/cliente).
-  - **`instagram-go-live`** depende de tudo acima, inclusive
-    `instagram-webhook-exposure`.
-  - **`instagram-operability`** depende de `instagram-ingestion-service`
-    (os alertas usam código de lá).
+  - **`instagram-live-smoke-test`** depende de tudo acima
+    (`identity-multichannel`, `channel-queue-visibility`,
+    `instagram-channel-client`, `instagram-messaging-window`,
+    `instagram-ingestion-service`) — é o novo passo mínimo para validar a
+    integração real antes de investir na operação madura. Usa túnel HTTPS
+    provisório em vez de domínio definitivo.
+  - **`instagram-webhook-exposure`**, **`instagram-go-live`** (homologação
+    formal de 14 casos + canário de 3 dias) e **`instagram-operability`**
+    (runbook/treinamento) estão **adiados** — retomados só depois que
+    `instagram-live-smoke-test` confirmar que o esqueleto funciona contra a
+    API real, priorizados pelo que os testes reais revelarem, não pelo que
+    foi imaginado a priori. Ver nota "Adiado" em cada `proposal.md`.
 
   Detalhe e justificativa de cada dependência em cada `proposal.md`.
 

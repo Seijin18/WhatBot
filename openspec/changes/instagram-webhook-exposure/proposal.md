@@ -32,3 +32,12 @@ Detalhe e justificativa completos em
 - Não bloqueia nem é bloqueado por nenhum outro change de código — pode
   começar em paralelo desde o primeiro dia, é dependência de calendário
   (DNS, certificado), não de código
+
+## Adiado — retomar após smoke test
+
+Execução substituída, para a primeira validação real, por
+`instagram-live-smoke-test` (túnel HTTPS provisório, não domínio
+definitivo). O escopo aqui — domínio próprio, certificado permanente,
+`DEPLOYMENT.md` — continua válido como meta de produção madura. Retomar
+quando o smoke test confirmar que o esqueleto funciona e o volume/uso real
+justificar sair de infraestrutura provisória.

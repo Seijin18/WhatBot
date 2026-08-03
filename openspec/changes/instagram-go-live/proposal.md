@@ -45,3 +45,15 @@ Meta), por isso fica por último — tudo mais precisa estar verde antes.
   `instagram-messaging-window`, `instagram-channel-client`,
   `instagram-webhook-exposure`, `instagram-ingestion-service` — todos
   precisam estar prontos antes de ligar a conta real
+
+## Adiado — retomar após smoke test
+
+`instagram-live-smoke-test` já absorve a parte mínima deste change:
+registrar `InstagramClient` no `ChannelRouter`, `TEST_IGSIDS` restrito ao
+operador (canário de 1 pessoa), suíte verde como pré-condição. O que
+continua adiado, para depois que o smoke test confirmar o esqueleto:
+pré-requisitos formais de App Review (item 0.6, esperado desnecessário sob
+Standard Access, mas a confirmar), o **roteiro de homologação de 14 casos**
+e o **canário de 3 dias com abertura gradual** — ambos exigem volume e
+tempo que só se justificam depois de saber que o básico funciona contra a
+API real.
