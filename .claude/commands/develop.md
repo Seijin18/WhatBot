@@ -2,7 +2,7 @@
 description: Take an approved plan or proposal and run the implement-review loop (implementer + critic) until it passes or hits the iteration limit.
 argument-hint: [plano/proposta, ou referência ao documento gerado por /ideate]
 allowed-tools: Task, Read, Glob, Grep, Bash
-model: opus
+model: sonnet
 ---
 
 Você está no modo de desenvolvimento ativo. A fase de ideação já terminou —

@@ -121,9 +121,11 @@ Teste com:
    Ou use o atalho `/ideate [ideia]`, que encadeia `scope-explorer` → `planner`
    com um checkpoint de confirmação do usuário no meio.
 1. **Plan Mode** (Shift+Tab duas vezes) na sessão principal para tarefas
-   pequenas/médias, OU dispare o subagente `planner` explicitamente para
-   tarefas grandes que merecem ficar isoladas do contexto principal. Se veio
-   do passo 0, passe a lista priorizada do scope-explorer como entrada.
+   pequenas/médias — é praticamente de graça comparado a um subagente, que
+   sobe um processo novo com contexto próprio. Só dispare o subagente
+   `planner` explicitamente para tarefas grandes que merecem ficar isoladas
+   do contexto principal. Se veio do passo 0, passe a lista priorizada do
+   scope-explorer como entrada.
 2. O OpenSpec já está configurado neste projeto (`openspec/`) — o planner lê
    as specs existentes e `openspec/project.md` antes de propor qualquer
    coisa, sem precisar pedir.
@@ -156,13 +158,47 @@ Teste com:
   reais da OpenRouter e fallback automático pro tier `:free` quando a conta
   não tiver crédito. Não deixe em "auto" — o modo automático tende a
   escolher os modelos de maior score, que são também os mais caros.
-- **Subagentes nativos**: `planner` e `critic` já rodam em `model: opus`
-  nativo do Claude Code — usam a cota do seu plano Pro, sem custo de
-  OpenRouter. O Zen entra só para pegar a opinião de um modelo de **outra
-  família** (Gemini, GPT, DeepSeek, Kimi) — pagar Opus de novo via
-  OpenRouter dentro do Zen seria redundante com o que o plano Pro já cobre.
+- **Subagentes nativos**: `planner`, `critic` e `scope-explorer` rodam em
+  `model: sonnet` por padrão (não Opus) — medido na prática (seção 6):
+  **uma conversa em Opus consome ~10x mais cota do plano do que uma em
+  Sonnet**, e como esses três subagentes são acionados a cada ciclo de
+  tarefa, deixá-los em Opus por padrão esgota a cota rápido sem ganho
+  proporcional na maioria dos casos. Peça Opus explicitamente só para algo
+  de altíssimo impacto arquitetural — os próprios subagentes vão sinalizar
+  quando acharem que o caso justifica, mas não trocam de modelo sozinhos.
+  O Zen entra numa camada separada, para pegar a opinião de um modelo de
+  **outra família** (Gemini, GPT, DeepSeek, Kimi) via OpenRouter — não use
+  Opus via OpenRouter dentro do Zen, seria pagar de novo pelo que o plano
+  Pro já cobre.
 
-## 5. Checklist rápido
+## 5. Monitorar o gasto de cota por tarefa
+
+Sem instalar nada além de `npx`, dá pra ver exatamente quanto cada
+sessão/dia consumiu, lendo os logs locais do próprio Claude Code (nenhum
+dado sai da sua máquina):
+
+```bash
+# visão geral por dia
+npx ccusage@latest daily
+
+# quebra por sessão individual (últimos N dias)
+npx ccusage@latest session --since AAAAMMDD
+```
+
+Os valores em USD são um **proxy de equivalência** (quanto custaria se
+fosse API paga por token), não uma cobrança real — no plano Pro/Max você
+paga assinatura fixa, não por token. Mesmo assim é o número mais direto
+para comparar tarefas entre si: se um `/develop` de uma mudança pequena
+apareceu com um valor equivalente muito maior que um de mudança grande,
+algo saiu do previsto (loop se repetindo, contexto sendo re-lido demais,
+etc.) e vale investigar antes da próxima vez.
+
+Para saber qual sessão é qual projeto/tarefa, os logs ficam em
+`~/.claude/projects/<pasta-do-projeto>/<session-id>.jsonl` — o nome da
+pasta já identifica o projeto; o horário de início do arquivo ajuda a
+cruzar com o que você estava fazendo naquele momento.
+
+## 6. Checklist rápido
 
 - [ ] Variáveis de ambiente de usuário `OPENROUTER_API_KEY` (key free da
       OpenRouter) e `ZEN_MCP_SERVER_HOME` definidas via
@@ -175,9 +211,12 @@ Teste com:
       `mcp==1.29.0` instalado (ver "Setup do Zen" acima) — nada de wrapper
       npm de terceiros
 - [ ] `.claude/agents/planner.md`, `critic.md`, `implementer.md`,
-      `scope-explorer.md` no lugar
+      `scope-explorer.md` no lugar, todos em `model: sonnet` (Opus só sob
+      pedido explícito — ver seção 4)
 - [ ] `claude mcp list` mostra zen, context-mode e codebase-memory ativos
 - [ ] Rodar `npx -y codebase-memory-mcp --index .` uma vez por projeto
       (reindexação é incremental depois disso)
 - [ ] Testar o ciclo completo numa tarefa pequena antes de confiar nele
       numa tarefa grande
+- [ ] De vez em quando, rodar `npx ccusage@latest daily` pra conferir se o
+      gasto de cota condiz com o volume de trabalho (seção 5)

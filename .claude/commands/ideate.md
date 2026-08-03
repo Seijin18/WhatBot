@@ -2,7 +2,7 @@
 description: Explore and refine a broad idea into a structured, gap-covered proposal — no code is written. Chains scope-explorer then planner.
 argument-hint: [descrição da ideia ou área a explorar]
 allowed-tools: Task, Read, Glob, Grep
-model: opus
+model: sonnet
 ---
 
 Você está no modo de desenvolvimento de ideia. NUNCA use Edit, Write ou Bash
