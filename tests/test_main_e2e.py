@@ -735,5 +735,45 @@ class TestNoDuplicateHandoverSendWhenPostSendBookkeepingFails(MainE2ETestCase):
         self.assertEqual(len(self.wa.sent), 1)
 
 
+class TestInstagramClientRegistration(unittest.TestCase):
+    """`_register_instagram_client_if_configured` (instagram-live-smoke-test,
+    tarefa 3.1): o cliente só é registrado depois que uma credencial real
+    existe em `canal_credenciais` (via `scripts/ig_oauth.py`), para o
+    WhatsApp continuar funcionando sem exigir OAuth do Instagram já feito."""
+
+    def test_no_credential_leaves_instagram_unregistered(self):
+        db = FakeDatabase()
+        router = ChannelRouter()
+
+        main_mod._register_instagram_client_if_configured(router, db)
+
+        self.assertNotIn(INSTAGRAM, router.channels)
+        with self.assertRaises(main_mod.UnknownChannelError):
+            router.send_text(IGSID, "oi", canal=INSTAGRAM)
+
+    def test_credential_present_registers_a_working_client(self):
+        db = FakeDatabase()
+        db.upsert_channel_credential(
+            INSTAGRAM, access_token="tok-123", account_id="acc-456"
+        )
+        router = ChannelRouter()
+
+        main_mod._register_instagram_client_if_configured(router, db)
+
+        self.assertIn(INSTAGRAM, router.channels)
+        client = router.client_for(INSTAGRAM)
+        self.assertEqual(client.access_token, "tok-123")
+        self.assertEqual(client.account_id, "acc-456")
+        # `last_inbound_lookup` must be wired to `instagram_last_inbound_lookup`,
+        # not left `None` (fail-closed) or bound to the wrong channel.
+        contact = db.create_contact(canal=INSTAGRAM, external_id=IGSID)
+        db.update_contact_last_inbound(contact.id)
+        with patch("whatbot.channels.instagram.requests.post") as post:
+            post.return_value.ok = True
+            post.return_value.json.return_value = {"message_id": "MSG1"}
+            client.send_text(IGSID, "oi")
+        post.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

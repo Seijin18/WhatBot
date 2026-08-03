@@ -29,6 +29,7 @@ from .channels import (
     normalize_channel,
     validate_channel,
 )
+from .channels.instagram import InstagramClient, instagram_last_inbound_lookup
 from .db import Database
 from .instagram_health import record_send_result
 from .llm import LlmUnavailableError, create_llm_client
@@ -74,6 +75,38 @@ _router: ChannelRouter | None = None
 _llm = None
 
 
+def _register_instagram_client_if_configured(router: ChannelRouter, db: Database) -> None:
+    """Register `InstagramClient` only once a real credential has been stored.
+
+    The Instagram OAuth flow (`scripts/ig_oauth.py`) is a manual, external
+    step run by an operator against the real Meta app — it cannot happen
+    inside `_init_infra()`. Until `canal_credenciais` has a row for
+    `instagram`, the channel simply isn't registered: the WhatsApp path
+    keeps working unaffected, and `ChannelRouter` already raises
+    `UnknownChannelError` (not a silent no-op) for any Instagram traffic in
+    the meantime, per the "Canal sem cliente registrado falha
+    explicitamente" requirement in `openspec/specs/channels/spec.md`.
+    """
+    try:
+        credential = db.get_channel_credential(INSTAGRAM)
+    except Exception:
+        logger.exception("Erro consultando credencial do Instagram; canal não registrado")
+        return
+    if credential is None:
+        logger.info(
+            "Nenhuma credencial do Instagram em canal_credenciais — canal não "
+            "registrado (rode scripts/ig_oauth.py para ativar)"
+        )
+        return
+    router.register(
+        InstagramClient(
+            access_token=credential.access_token,
+            account_id=credential.account_id,
+            last_inbound_lookup=instagram_last_inbound_lookup(db),
+        )
+    )
+
+
 def _init_infra() -> None:
     global _db, _router, _llm
     bootstrap_env()
@@ -97,6 +130,7 @@ def _init_infra() -> None:
                 api_key=api_key, instance_name=instance_name, base_url=base_url
             )
         )
+        _register_instagram_client_if_configured(_router, _db)
         logger.info("Canais ativos: %s", ", ".join(_router.channels))
     if _llm is None:
         _llm = create_llm_client()
