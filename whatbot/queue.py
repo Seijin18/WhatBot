@@ -20,6 +20,7 @@ from .config import (
 )
 from .channels import channel_label, messaging_window, send_admin
 from .db import Database, WaitingContact, resolve_label
+from .instagram_health import run_instagram_health_checks
 from .priority import prioridade_label
 
 logger = logging.getLogger("whatbot.queue")
@@ -311,8 +312,26 @@ def run_periodic_queue_checks(db: Database, router) -> dict:
         )
     long_wait = check_long_wait_notifications(db, router)
     daily = send_daily_summary_if_due(db, router)
+
+    # instagram-ingestion-service: limpeza periódica de `webhook_eventos`
+    # (tasks.md 2.2) e alertas de saúde da integração (credencial perto de
+    # expirar, silêncio prolongado de webhook) — reaproveita este job já
+    # agendado em vez de criar outro só para isso (tasks.md 3.4).
+    try:
+        purged = db.purge_old_webhook_events()
+    except Exception:
+        logger.exception("Falha ao limpar webhook_eventos antigos")
+        purged = 0
+    try:
+        instagram_health = run_instagram_health_checks(db, router)
+    except Exception:
+        logger.exception("Falha ao rodar checagens de saúde do Instagram")
+        instagram_health = {}
+
     return {
         "reactivated": reactivated,
         "long_wait": long_wait,
         "daily_summary": daily,
+        "webhook_events_purged": purged,
+        "instagram_health": instagram_health,
     }

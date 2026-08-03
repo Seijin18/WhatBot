@@ -20,6 +20,7 @@ from .config import (
     should_respond_to_customer,
 )
 from .channels import (
+    INSTAGRAM,
     WHATSAPP,
     ChannelError,
     ChannelRouter,
@@ -29,6 +30,7 @@ from .channels import (
     validate_channel,
 )
 from .db import Database
+from .instagram_health import record_send_result
 from .llm import LlmUnavailableError, create_llm_client
 from .domain import (
     build_handover_customer_message,
@@ -229,7 +231,11 @@ def process_customer_message(
             )
             logger.info("Criado novo contato: %s", contact.label)
         else:
-            if push_name:
+            if push_name and not simulated:
+                # Guarded by `not simulated`: an admin simulation must never
+                # overwrite a real contact's push_name (e.g. "Maria Real" ->
+                # "Simulado por 5511900000001") if `sim_phone` happens to
+                # collide with an existing customer.
                 _db.update_contact_push_name(contact.id, push_name)
             logger.info(
                 "Contato existente: %s (ia_ativa=%s)", contact.label, contact.ia_ativa
@@ -254,10 +260,13 @@ def process_customer_message(
 
     if not contact.ia_ativa:
         logger.info("IA desativada para %s - early return", contact.label)
-        try:
-            _db.save_message(contact.id, direction="in", text=text)
-        except Exception:
-            logger.exception("Falha ao salvar mensagem na fila")
+        if not simulated:
+            # Guarded by `not simulated`: a simulation must never leave a
+            # trace in the real contact's message history.
+            try:
+                _db.save_message(contact.id, direction="in", text=text)
+            except Exception:
+                logger.exception("Falha ao salvar mensagem na fila")
         return {
             "ok": True,
             "handed_to_human": True,
@@ -266,10 +275,13 @@ def process_customer_message(
             "simulated": simulated,
         }
 
-    try:
-        _db.save_message(contact.id, direction="in", text=text)
-    except Exception:
-        logger.exception("Falha ao salvar mensagem de entrada; prosseguindo")
+    if not simulated:
+        # Guarded by `not simulated`: a simulated conversation must never be
+        # recorded in the real contact's message history.
+        try:
+            _db.save_message(contact.id, direction="in", text=text)
+        except Exception:
+            logger.exception("Falha ao salvar mensagem de entrada; prosseguindo")
 
     log_inbound(
         phone,
@@ -360,7 +372,22 @@ def process_customer_message(
                         source="system",
                         contact_id=contact.id,
                     )
-                    _db.save_message(contact.id, direction="out", text=MODEL_UNAVAILABLE_MSG)
+                    # The message above already reached the customer at this
+                    # point — a bookkeeping failure below must not surface as
+                    # an exception (it would be caught upstream in `main()`
+                    # as `processing_failed`, roll back the webhook
+                    # idempotency record and cause the retry to resend this
+                    # same notice to the real customer; critic: risco de
+                    # envio duplicado).
+                    try:
+                        _db.save_message(
+                            contact.id, direction="out", text=MODEL_UNAVAILABLE_MSG
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Falha ao salvar aviso de indisponibilidade; "
+                            "prosseguindo (mensagem já foi entregue ao cliente)"
+                        )
                 return {"ok": False, "error": "gemini_quota", "detail": str(e)}
         except Exception as e:
             logger.exception("Erro no modelo após retries Gemini: %s", e)
@@ -376,7 +403,19 @@ def process_customer_message(
                         source="system",
                         contact_id=contact.id,
                     )
-                    _db.save_message(contact.id, direction="out", text=MODEL_UNAVAILABLE_MSG)
+                    # Same reasoning as the `LlmUnavailableError` branch above:
+                    # the message already reached the customer, so a
+                    # bookkeeping failure here must stay best-effort and not
+                    # trigger a webhook-idempotency rollback + resend.
+                    try:
+                        _db.save_message(
+                            contact.id, direction="out", text=MODEL_UNAVAILABLE_MSG
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Falha ao salvar aviso de indisponibilidade; "
+                            "prosseguindo (mensagem já foi entregue ao cliente)"
+                        )
                 return {"ok": False, "error": "model_error", "detail": str(e)}
 
     if used_fallback:
@@ -391,10 +430,13 @@ def process_customer_message(
         if grounding_corrected:
             response_mode = grounding_meta.get("response_mode", "grounding_fix")
 
-    try:
-        _db.update_contact_session_state(contact.id, session.to_dict())
-    except Exception:
-        logger.exception("Falha ao persistir session_state")
+    if not simulated:
+        # Guarded by `not simulated`: a simulation must not mutate the real
+        # contact's conversational session state.
+        try:
+            _db.update_contact_session_state(contact.id, session.to_dict())
+        except Exception:
+            logger.exception("Falha ao persistir session_state")
 
     llm_model = os.getenv("OLLAMA_MODEL") if os.getenv("LLM_PROVIDER", "gemini") == "ollama" else os.getenv("GEMINI_MODEL")
     log_llm_turn(
@@ -452,6 +494,14 @@ def process_customer_message(
                 source="bot",
                 contact_id=contact.id,
             )
+            if canal == INSTAGRAM:
+                # Requirement "Alertas de saúde da integração": the real
+                # send path is the only place a consecutive-failure streak
+                # can be observed (critic BLOQUEADOR 1 — previously nothing
+                # called this outside of tests, so the alert never fired in
+                # production). `record_send_result` is best-effort and never
+                # raises.
+                record_send_result(_db, _router, canal, success=True)
         else:
             log_outbound(
                 phone,
@@ -463,18 +513,10 @@ def process_customer_message(
                 delivery="skipped",
             )
             logger.info("Simulação: resposta não enviada ao cliente fictício %s", phone)
-        _db.save_message(contact.id, direction="out", text=model_reply)
-        return {
-            "ok": True,
-            "sent": True,
-            "model_reply": model_reply,
-            "queue_check": queue_check,
-            "simulated": simulated,
-            "intent": intent_result.intent,
-            "response_mode": response_mode,
-        }
     except ChannelError as e:
         logger.exception("Falha de entrega no canal %s: %s", e.canal, e)
+        if e.canal == INSTAGRAM:
+            record_send_result(_db, _router, e.canal, success=False)
         return {
             "ok": False,
             "error": "send_failed",
@@ -485,6 +527,33 @@ def process_customer_message(
     except Exception as e:
         logger.exception("Erro ao enviar resposta ao cliente: %s", e)
         return {"ok": False, "error": "send_failed", "detail": str(e)}
+
+    # The reply is already delivered to the customer (or this is a
+    # simulation, where nothing was sent) at this point — a bookkeeping
+    # failure below must stay best-effort and never turn the return into
+    # `ok: False`. `main()` deletes the webhook-idempotency record whenever
+    # `ok` is falsy, and the next redelivery of the same `message_id` would
+    # reprocess from scratch and resend this reply to the real customer
+    # (critic: risco de envio duplicado ao cliente real).
+    if not simulated:
+        # Guarded by `not simulated`: a simulation must never leave a trace
+        # in the real contact's message history.
+        try:
+            _db.save_message(contact.id, direction="out", text=model_reply)
+        except Exception:
+            logger.exception(
+                "Falha ao salvar mensagem de saída; prosseguindo (envio já ocorreu)"
+            )
+
+    return {
+        "ok": True,
+        "sent": True,
+        "model_reply": model_reply,
+        "queue_check": queue_check,
+        "simulated": simulated,
+        "intent": intent_result.intent,
+        "response_mode": response_mode,
+    }
 
 
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -549,6 +618,67 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "detail": str(e),
         }
 
+    # Idempotência de entrega de webhook (instagram-ingestion-service): a
+    # reentrega de um evento já visto é descartada aqui, na porta de entrada
+    # compartilhada por qualquer transporte (Windmill síncrono para
+    # WhatsApp, `whatbot/ingress.py` em background para o Instagram) — evita
+    # duplicar a resposta ao cliente sem depender de dedupe no transporte.
+    message_id = payload.get("message_id")
+    if message_id:
+        try:
+            is_new_event = _db.record_webhook_event(canal, message_id)
+        except Exception:
+            logger.exception(
+                "Falha ao checar idempotência do evento; prosseguindo sem dedupe"
+            )
+            is_new_event = True
+        if not is_new_event:
+            logger.info(
+                "Evento duplicado descartado: canal=%s message_id=%s", canal, message_id
+            )
+            return {"ok": True, "ignored": True, "reason": "duplicate_message_id"}
+
+        # Bloqueador 2 (critic): se o processamento falhar *depois* do
+        # registro acima, a reentrega da Meta seria descartada como
+        # duplicata para sempre e o cliente nunca receberia resposta —
+        # perda silenciosa. Desfaz o registro (`delete_webhook_event`)
+        # sempre que o processamento não termina em sucesso, para que a
+        # próxima reentrega do mesmo `message_id` seja reprocessada em vez
+        # de descartada. Best-effort: se o rollback em si falhar, loga e
+        # segue — pior caso volta ao comportamento anterior (perda), não
+        # cria um novo modo de falha.
+        try:
+            result = _dispatch_payload(payload, original, canal)
+        except Exception as e:
+            logger.exception(
+                "Erro processando evento; desfazendo idempotência para permitir reentrega: %s",
+                e,
+            )
+            try:
+                _db.delete_webhook_event(canal, message_id)
+            except Exception:
+                logger.exception("Falha ao desfazer idempotência do evento")
+            return {"ok": False, "error": "processing_failed", "detail": str(e)}
+        if not result.get("ok", True):
+            try:
+                _db.delete_webhook_event(canal, message_id)
+            except Exception:
+                logger.exception("Falha ao desfazer idempotência do evento")
+        return result
+
+    return _dispatch_payload(payload, original, canal)
+
+
+def _dispatch_payload(
+    payload: Dict[str, Any], original: Dict[str, Any], canal: str
+) -> Dict[str, Any]:
+    """Routes a validated, deduplicated payload: admin command, ignored
+    (incomplete/test-mode), or a customer message.
+
+    Split out of `main()` so idempotency (above) can wrap the whole
+    remaining flow and roll it back on failure (critic BLOQUEADOR 2), not
+    just the final `process_customer_message()` call.
+    """
     phone = (
         payload.get("from_number")
         or payload.get("from")

@@ -100,21 +100,45 @@ def executar_handover_para_secretaria(
             simulated=simulated,
             human_agent=True,
         )
-    db.save_message(contact_id, direction="out", text=handover_text)
-    db.enroll_handover(
-        contact_id, motivo=motivo, push_name=push_name, prioridade=prioridade
-    )
+
+    # The handover confirmation is already delivered to the customer (or this
+    # is a simulation, where nothing was sent) at this point — every step
+    # below must stay best-effort and never let the caller see anything but
+    # `ok: True`. `main()` deletes the webhook-idempotency record whenever the
+    # result isn't `ok`, and the next redelivery of the same `message_id`
+    # would reprocess from scratch and resend the handover message to the
+    # real customer (same class of bug already fixed for the LLM reply path
+    # in `main.py::process_customer_message`).
+    notify_result: dict = {"skipped": "simulated"} if simulated else {}
+    long_wait_result: dict = {}
+    if not simulated:
+        # Guarded by `not simulated`: a simulated handover must not leave a
+        # trace in the real contact's message history, nor deactivate the
+        # bot / enroll the real contact in the secretariat queue.
+        try:
+            db.save_message(contact_id, direction="out", text=handover_text)
+            db.enroll_handover(
+                contact_id, motivo=motivo, push_name=push_name, prioridade=prioridade
+            )
+        except Exception:
+            logger.exception(
+                "Erro registrando handover (bookkeeping pós-envio, best-effort): %s",
+                phone,
+            )
+        try:
+            waiting = db.get_contact_waiting(phone, canal=canal)
+            notify_result = process_new_handover(db, router, contact=waiting)
+            long_wait_result = check_long_wait_notifications(db, router)
+        except Exception:
+            logger.exception(
+                "Erro notificando admin sobre handover (best-effort): %s", phone
+            )
+            notify_result = {"skipped": "notify_failed"}
+            long_wait_result = {}
+
     logger.info(
         "Handover para secretaria (%s, prio=%s): %s", motivo, prioridade, phone
     )
-
-    if simulated:
-        notify_result = {"skipped": "simulated"}
-        long_wait_result = {}
-    else:
-        waiting = db.get_contact_waiting(phone, canal=canal)
-        notify_result = process_new_handover(db, router, contact=waiting)
-        long_wait_result = check_long_wait_notifications(db, router)
 
     return {
         "ok": True,

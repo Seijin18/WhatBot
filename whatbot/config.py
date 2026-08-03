@@ -277,6 +277,53 @@ ENV_EVOLUTION_API_KEY = "EVOLUTION_API_KEY"
 ENV_EVOLUTION_API_INSTANCE_NAME = "EVOLUTION_API_INSTANCE_NAME"
 ENV_GEMINI_API_KEY = "GEMINI_API_KEY"
 
+# instagram-ingestion-service: naming follows the Meta webhook convention
+# (`hub.verify_token` handshake, `X-Hub-Signature-256` app-secret HMAC) —
+# there is no equivalent WhatsApp/Evolution convention to mirror, since
+# Evolution API does not implement Meta's webhook verification protocol.
+ENV_IG_WEBHOOK_VERIFY_TOKEN = "IG_WEBHOOK_VERIFY_TOKEN"
+ENV_IG_APP_SECRET = "IG_APP_SECRET"
+ENV_IG_APP_ID = "IG_APP_ID"
+ENV_IG_CLIENT_SECRET = "IG_CLIENT_SECRET"
+ENV_IG_INGRESS_PORT = "IG_INGRESS_PORT"
+# Alinhado com `.env.example` e `docker-compose.yml` (serviço `whatbot-ingress`,
+# perfil "instagram") — os três devem concordar, ver critic MENOR 5.
+DEFAULT_IG_INGRESS_PORT = 8090
+
+# Alertas de saúde da integração (Requirement "Alertas de saúde da
+# integração"): os dois limiares e seus defaults são definidos aqui — o
+# change `instagram-operability` só documenta runbook/mensagens finais.
+ENV_IG_ALERT_FAIL_STREAK = "IG_ALERT_FAIL_STREAK"
+ENV_IG_ALERT_SILENCE_MINUTES = "IG_ALERT_SILENCE_MINUTES"
+DEFAULT_IG_ALERT_FAIL_STREAK = 5
+DEFAULT_IG_ALERT_SILENCE_MINUTES = 120
+
+# A credencial é considerada "perto de expirar" (Requirement "Renovação
+# automática de credencial") dentro desta janela.
+IG_CREDENTIAL_EXPIRY_WARNING_DAYS = 7
+
+# Vida útil padrão de um long-lived token do Instagram quando a resposta da
+# renovação não traz `expires_in` (critic MENOR 6): usado só para não gerar
+# alerta falso logo após uma renovação que não teve erro — a Meta documenta
+# 60 dias para o long-lived token do Instagram API with Instagram Login.
+DEFAULT_IG_TOKEN_LIFETIME_DAYS = 60
+
+
+def ig_alert_fail_streak() -> int:
+    try:
+        return max(1, int(os.getenv(ENV_IG_ALERT_FAIL_STREAK, str(DEFAULT_IG_ALERT_FAIL_STREAK))))
+    except ValueError:
+        return DEFAULT_IG_ALERT_FAIL_STREAK
+
+
+def ig_alert_silence_minutes() -> int:
+    try:
+        return max(
+            1, int(os.getenv(ENV_IG_ALERT_SILENCE_MINUTES, str(DEFAULT_IG_ALERT_SILENCE_MINUTES)))
+        )
+    except ValueError:
+        return DEFAULT_IG_ALERT_SILENCE_MINUTES
+
 
 PLACEHOLDER_VALUES = {
     "",

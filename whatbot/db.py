@@ -79,6 +79,22 @@ class MessageRecord:
     created_at: datetime
 
 
+@dataclass
+class ChannelCredential:
+    """Row of `canal_credenciais` (see `ensure_schema()`).
+
+    Read/written by `whatbot/ingress.py` (idempotency does not touch this
+    table) and by the credential-renewal job
+    (`windmill/f/whatbot/refresh_ig_token.py`, `scripts/ig_refresh_token.py`).
+    """
+
+    canal: str
+    account_id: str | None
+    access_token: str
+    expires_at: datetime | None
+    refreshed_at: datetime | None
+
+
 class Database:
     def __init__(self, dsn: str):
         self._dsn = dsn
@@ -189,6 +205,15 @@ class Database:
         );
         CREATE INDEX IF NOT EXISTS webhook_eventos_received_idx
             ON webhook_eventos (received_at);
+        -- Streak de falhas de envio consecutivas por canal, persistido (não
+        -- em memória de processo): no Windmill cada execução é um processo
+        -- novo, então um contador em memória nunca sobreviveria entre
+        -- entregas (ver critic BLOQUEADOR 1, `whatbot/instagram_health.py`).
+        CREATE TABLE IF NOT EXISTS canal_envio_falhas (
+            canal VARCHAR(16) PRIMARY KEY,
+            streak INTEGER NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+        );
         INSERT INTO notificacao_admin (id, pendentes_desde_ultimo_lote) VALUES (1, 0)
         ON CONFLICT (id) DO NOTHING;
         """
@@ -977,3 +1002,206 @@ class Database:
                     }
                     for r in cur.fetchall()
                 ]
+
+    # -- webhook idempotency (instagram-ingestion-service) ---------------
+
+    def record_webhook_event(self, canal: str, message_id: str) -> bool:
+        """Record `(canal, message_id)` in `webhook_eventos`; return whether it is new.
+
+        Single source of truth for Requirement "Idempotência de entrega de
+        webhook": the first delivery inserts a new row and returns `True`; any
+        reentrega hits the `(canal, message_id)` primary key and returns
+        `False` — the caller (`whatbot/main.py::main()`) discards it without
+        error, which is what stops the Meta webhook from retrying forever.
+        Called from `main()` directly (not only from `whatbot/ingress.py`) so
+        the guarantee holds regardless of transport — see
+        `tests/test_main_e2e.py`, idempotency at the `main()` seam.
+        """
+        canal = normalize_channel(canal)
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO webhook_eventos (canal, message_id)
+                        VALUES (%s, %s)
+                        ON CONFLICT (canal, message_id) DO NOTHING
+                        """,
+                        (canal, message_id),
+                    )
+                    return cur.rowcount > 0
+        except Exception as e:
+            self._logger.exception("Erro registrando evento de webhook: %s", e)
+            raise
+
+    def get_last_webhook_event_at(self, canal: str | None = None) -> datetime | None:
+        """Most recent `received_at` for `canal`, or `None` if none was ever recorded.
+
+        Feeds the "ausência prolongada de eventos" health alert
+        (`whatbot/instagram_health.py`).
+        """
+        canal = normalize_channel(canal)
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT MAX(received_at) FROM webhook_eventos WHERE canal = %s",
+                        (canal,),
+                    )
+                    row = cur.fetchone()
+                    return row[0] if row else None
+        except Exception as e:
+            self._logger.exception("Erro buscando último evento de webhook: %s", e)
+            raise
+
+    def purge_old_webhook_events(self, older_than_days: int = 7) -> int:
+        """Delete `webhook_eventos` rows older than `older_than_days`; return count removed.
+
+        Called from the existing scheduled job (`run_periodic_queue_checks`),
+        per tasks.md 2.2 — no new Windmill job needed just for this.
+        """
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM webhook_eventos WHERE received_at < now() - (%s || ' days')::interval",
+                        (str(max(0, older_than_days)),),
+                    )
+                    return cur.rowcount
+        except Exception as e:
+            self._logger.exception("Erro limpando webhook_eventos: %s", e)
+            raise
+
+    def delete_webhook_event(self, canal: str, message_id: str) -> None:
+        """Undo `record_webhook_event` for `(canal, message_id)`.
+
+        Called from `whatbot/main.py::main()` when processing fails *after*
+        idempotency was already recorded, so the next Meta reentrega is not
+        discarded as a duplicate and the customer is not permanently left
+        without an answer (critic BLOQUEADOR 2).
+        """
+        canal = normalize_channel(canal)
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM webhook_eventos WHERE canal = %s AND message_id = %s",
+                        (canal, message_id),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro desfazendo idempotência de evento: %s", e)
+            raise
+
+    # -- send-failure streak (instagram-ingestion-service) ---------------
+
+    def increment_send_fail_streak(self, canal: str) -> int:
+        """Increment `canal`'s consecutive-send-failure streak; return the new value.
+
+        Persisted (see `ensure_schema` `canal_envio_falhas`) so the streak
+        survives across Windmill executions, which each run in a fresh
+        process (critic BLOQUEADOR 1).
+        """
+        canal = normalize_channel(canal)
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO canal_envio_falhas (canal, streak, updated_at)
+                        VALUES (%s, 1, now())
+                        ON CONFLICT (canal) DO UPDATE
+                        SET streak = canal_envio_falhas.streak + 1, updated_at = now()
+                        RETURNING streak
+                        """,
+                        (canal,),
+                    )
+                    row = cur.fetchone()
+                    return row[0] if row else 1
+        except Exception as e:
+            self._logger.exception("Erro incrementando streak de falhas de envio: %s", e)
+            raise
+
+    def reset_send_fail_streak(self, canal: str) -> None:
+        """Zero `canal`'s consecutive-send-failure streak (a success resets it)."""
+        canal = normalize_channel(canal)
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO canal_envio_falhas (canal, streak, updated_at)
+                        VALUES (%s, 0, now())
+                        ON CONFLICT (canal) DO UPDATE
+                        SET streak = 0, updated_at = now()
+                        """,
+                        (canal,),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro resetando streak de falhas de envio: %s", e)
+            raise
+
+    # -- channel credentials (instagram-ingestion-service) ---------------
+
+    def upsert_channel_credential(
+        self,
+        canal: str,
+        access_token: str,
+        *,
+        account_id: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> None:
+        """Insert or replace the credential for `canal` (one row per channel)."""
+        canal = normalize_channel(canal)
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO canal_credenciais
+                            (canal, account_id, access_token, expires_at, refreshed_at)
+                        VALUES (%s, %s, %s, %s, now())
+                        ON CONFLICT (canal) DO UPDATE
+                        SET account_id = EXCLUDED.account_id,
+                            access_token = EXCLUDED.access_token,
+                            expires_at = EXCLUDED.expires_at,
+                            refreshed_at = now()
+                        """,
+                        (canal, account_id, access_token, expires_at),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro salvando credencial de canal: %s", e)
+            raise
+
+    def get_channel_credential(self, canal: str) -> ChannelCredential | None:
+        canal = normalize_channel(canal)
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT canal, account_id, access_token, expires_at, refreshed_at
+                        FROM canal_credenciais WHERE canal = %s
+                        """,
+                        (canal,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return None
+                    return ChannelCredential(
+                        canal=row[0],
+                        account_id=row[1],
+                        access_token=row[2],
+                        expires_at=row[3],
+                        refreshed_at=row[4],
+                    )
+        except Exception as e:
+            self._logger.exception("Erro buscando credencial de canal: %s", e)
+            raise
