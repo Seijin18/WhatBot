@@ -1,4 +1,4 @@
-.PHONY: up up-d down logs ps test test-migration chat chat-test
+.PHONY: up up-d down logs ps test test-migration chat chat-test ig-health ig-refresh ig-simulate
 
 COMPOSE = docker compose
 PROFILES = --profile windmill
@@ -42,3 +42,13 @@ chat:
 		--add-host=host.docker.internal:host-gateway \
 		-e DB_DSN=postgresql://whatbot:whatbot@host.docker.internal:5432/whatbot \
 		python:3.12-slim bash -lc "$(CHAT_INSTALL) python scripts/chat_test.py -i"
+
+# Operação da integração com Instagram (instagram-ingestion-service).
+ig-health:
+	python scripts/ig_health_check.py
+
+ig-refresh:
+	python scripts/ig_refresh_token.py
+
+ig-simulate:
+	python scripts/ig_simulate_webhook.py $(ARGS)

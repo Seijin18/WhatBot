@@ -86,6 +86,27 @@ services:
         condition: service_started
     command: sh -c "sleep 5 && python -m whatbot.main"
 
+  whatbot-ingress:
+    profiles:
+      - instagram
+    container_name: whatbot_ingress
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${IG_INGRESS_PORT:-8090}:${IG_INGRESS_PORT:-8090}"
+    volumes:
+      - ./:/app
+    environment:
+      DB_DSN: postgresql://whatbot:whatbot@db:5432/whatbot
+      IG_INGRESS_PORT: ${IG_INGRESS_PORT:-8090}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      sh -c "uvicorn whatbot.ingress:app --host 0.0.0.0 --port ${IG_INGRESS_PORT:-8090}"
+
   windmill-db:
     profiles:
       - windmill
