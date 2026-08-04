@@ -17,11 +17,6 @@ def _norm(text: str) -> str:
     return norm_text(text)
 
 
-def detect_modalidades(text: str) -> List[str]:
-    """Return modalidade names from the knowledge base mentioned in text."""
-    return get_knowledge_facts().match_modalidades(text)
-
-
 @dataclass
 class SessionState:
     modalidade_interesse: List[str] = field(default_factory=list)
