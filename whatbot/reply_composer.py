@@ -19,14 +19,25 @@ from .knowledge_facts import KnowledgeFacts, day_label, extract_days, get_knowle
 from .session_state import SessionState
 from .tools import buscar_faq, buscar_horarios_turmas, buscar_info_associacao, buscar_precos
 
-_CLOSING = (
+_GENERIC_CLOSING = "Se precisar de mais alguma coisa, é só me chamar."
+_EXPERIMENTAL_CLOSING = (
     "Se quiser agendar aula experimental ou falar com a secretaria, é só me avisar."
 )
+
+
+def default_closing(facts: KnowledgeFacts) -> str:
+    """Closing line adapted to whether this business offers trial classes."""
+    if facts.experimental_slots:
+        return _EXPERIMENTAL_CLOSING
+    return _GENERIC_CLOSING
 
 
 class ReplyComposer:
     def __init__(self, facts: KnowledgeFacts | None = None):
         self._facts = facts or get_knowledge_facts()
+
+    def _closing(self) -> str:
+        return default_closing(self._facts)
 
     def compose(
         self,
@@ -102,22 +113,38 @@ class ReplyComposer:
         self, user_message: str, session: SessionState, intent: IntentResult
     ) -> str:
         label = self._facts.association_name
-        mods = ", ".join(self._facts.modalidade_names) or "nossas modalidades"
+        if self._facts.modalidade_names:
+            mods = ", ".join(self._facts.modalidade_names)
+            return (
+                f"Olá! Somos a {label}. "
+                f"Temos {mods}. "
+                f"Posso ajudar com horários, preços ou agendamento de aula experimental?"
+            )
         return (
-            f"Boa noite! Somos a {label}. "
-            f"Temos {mods}. "
-            f"Posso ajudar com horários, preços ou agendamento de aula experimental?"
+            f"Olá! Somos a {label}. "
+            "Posso ajudar com informações sobre nossos produtos, preços ou como fazer um pedido?"
         )
 
     def _compose_horarios(
         self, user_message: str, session: SessionState, intent: IntentResult
     ) -> str:
+        from .tools import listar_modalidades
+
+        if not self._facts.modalidade_names:
+            # No `## Modalidades` section in this KB — there's no schedule
+            # to look up, so the closest useful reply to a "horários"/"o
+            # que vocês têm" style question is the catalog/price listing
+            # (`listar_modalidades()` itself falls back to it — see
+            # docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.1/P1.3). Without
+            # this early return, the code below fell through to
+            # `buscar_horarios_turmas("")`, which returned a broken
+            # "Modalidade '' não encontrada" message.
+            return f"{listar_modalidades()}\n\n{self._closing()}"
+
         norm = norm_text(user_message)
         if any(token in norm for token in _LISTING_SIGNALS):
-            from .tools import listar_modalidades
-
             listing = listar_modalidades()
-            return f"{listing}\n\n{_CLOSING}"
+            return f"{listing}\n\n{self._closing()}"
 
         mods = intent.modalities or session.modalidade_interesse or self._facts.modalidade_names
         parts: list[str] = []
@@ -126,7 +153,7 @@ class ReplyComposer:
             if block and "não encontrada" not in block.lower():
                 parts.append(block)
         body = "\n".join(parts) or buscar_horarios_turmas(mods[0] if mods else "")
-        return f"{body}\n\n{_CLOSING}"
+        return f"{body}\n\n{self._closing()}"
 
     def _compose_precos(
         self, user_message: str, session: SessionState, intent: IntentResult
@@ -142,20 +169,20 @@ class ReplyComposer:
                 f"Os planos mensal e semestral valem para {self._modalities_label(scope_mods, user_message)}:",
                 f"- Plano mensal: R$ {self._facts.monthly_price} (1 aluno)"
                 if self._facts.monthly_price is not None
-                else "- Plano mensal: consulte a secretaria",
+                else "- Plano mensal: consulte o atendimento",
                 f"- Plano semestral: R$ {self._facts.semester_price} (1 aluno)"
                 if self._facts.semester_price is not None
-                else "- Plano semestral: consulte a secretaria",
-                "Há desconto para o 2º integrante da mesma família — consulte a secretaria.",
+                else "- Plano semestral: consulte o atendimento",
+                "Há desconto para o 2º integrante da mesma família — consulte o atendimento.",
                 "Esses valores são dos planos regulares; a base não informa preço de aula experimental.",
             ]
-            return "\n".join(lines) + f"\n\n{_CLOSING}"
+            return "\n".join(lines) + f"\n\n{self._closing()}"
 
         if unique_groups:
             body = buscar_precos(unique_groups[0])
         else:
             body = buscar_precos("")
-        return f"{body}\n\n{_CLOSING}"
+        return f"{body}\n\n{self._closing()}"
 
     def _group_modalidades_for_pricing(self, mods: List[str]) -> List[str]:
         """Collapse variant names (e.g. judô infantil/adulto) to one entry per family."""
@@ -181,14 +208,14 @@ class ReplyComposer:
                 "Sim, você pode agendar aula experimental — cada modalidade tem seu dia disponível:"
             ]
             for slot in slots:
-                day = day_label(slot.days[0]) if slot.days else "consulte a secretaria"
+                day = day_label(slot.days[0]) if slot.days else "consulte o atendimento"
                 lines.append(f"- {slot.primary_name()}: {day}")
             lines.extend(
                 [
                     "",
                     "Para agendar, envie nome, idade, celular/telefone e o dia desejado.",
                     "",
-                    _CLOSING,
+                    self._closing(),
                 ]
             )
             return "\n".join(lines)
@@ -208,25 +235,25 @@ class ReplyComposer:
                     f"As aulas regulares de {primary} também ocorrem em outros dias da semana, "
                     f"mas a experimental é só nesse dia.\n\n"
                     "Para agendar, envie nome, idade, celular/telefone e confirme o dia.\n\n"
-                    f"{_CLOSING}"
+                    f"{self._closing()}"
                 )
 
         slot = self._facts.experimental_slot_for(primary) if primary else None
-        day_text = day_label(slot.days[0]) if slot and slot.days else "consulte a secretaria"
+        day_text = day_label(slot.days[0]) if slot and slot.days else "consulte o atendimento"
         modality_label = primary or (slot.primary_name() if slot else "a modalidade")
 
         return (
             f"A aula experimental de {modality_label} é agendada para {day_text}. "
             f"{self._price_disclaimer()}\n\n"
             "Para agendar, envie nome, idade, celular/telefone e o dia desejado.\n\n"
-            f"{_CLOSING}"
+            f"{self._closing()}"
         )
 
     def _compose_matricula(
         self, user_message: str, session: SessionState, intent: IntentResult
     ) -> str:
         info = buscar_info_associacao("matrícula")
-        return f"{info}\n\n{_CLOSING}"
+        return f"{info}\n\n{self._closing()}"
 
     def _compose_faq(
         self, user_message: str, session: SessionState, intent: IntentResult
@@ -237,13 +264,13 @@ class ReplyComposer:
             info = buscar_info_associacao("sobre a associação")
             if info and "não encontrei" not in info.lower():
                 body = info.replace("Sobre a associação:", "").replace("Sobre:", "").strip()
-                return f"{body}\n\n{_CLOSING}"
+                return f"{body}\n\n{self._closing()}"
 
         faq = buscar_faq(user_message)
         if faq and "não encontrei" not in faq.lower():
             cleaned = faq.replace("P:", "").replace("R:", "").strip()
             if len(cleaned) < 800:
-                return f"{cleaned}\n\n{_CLOSING}"
+                return f"{cleaned}\n\n{self._closing()}"
         return None
 
 

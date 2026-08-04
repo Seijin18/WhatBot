@@ -6,43 +6,43 @@ from .knowledge import get_knowledge_store
 
 
 def listar_modalidades() -> str:
-    """Lista todas as modalidades/atividades oferecidas pela associação.
+    """Lista todos os produtos, serviços ou modalidades cadastrados no negócio.
 
     Returns:
-        Nome, horários e preços de cada modalidade cadastrada.
+        Nome, horários/prazos e preços de cada item cadastrado.
     """
     return get_knowledge_store().listar_modalidades()
 
 
 def buscar_horarios_turmas(modalidade: str) -> str:
-    """Consulta horários de uma modalidade específica.
+    """Consulta horários de um produto, serviço ou modalidade específica.
 
     Args:
-        modalidade: Nome da atividade (ex.: yoga, futebol adulto, dança).
+        modalidade: Nome do item cadastrado na base de conhecimento.
 
     Returns:
-        Horários e observações da modalidade solicitada.
+        Horários e observações do item solicitado.
     """
     return get_knowledge_store().buscar_horarios(modalidade)
 
 
 def buscar_precos(modalidade: str = "") -> str:
-    """Consulta preços mensais e regras de matrícula/pagamento.
+    """Consulta preços e regras de compra/pagamento.
 
     Args:
-        modalidade: Nome da modalidade. Se vazio, retorna a tabela completa.
+        modalidade: Nome do item. Se vazio, retorna a tabela completa.
 
     Returns:
-        Preço da modalidade ou tabela geral com taxa de matrícula e formas de pagamento.
+        Preço do item ou tabela geral com condições e formas de pagamento.
     """
     return get_knowledge_store().buscar_precos(modalidade or None)
 
 
 def buscar_info_associacao(topico: str) -> str:
-    """Busca informações gerais sobre a associação.
+    """Busca informações gerais sobre o negócio.
 
     Args:
-        topico: Assunto desejado (ex.: endereço, contato, matrícula, sobre a associação).
+        topico: Assunto desejado (ex.: endereço, contato, como comprar, sobre o negócio).
 
     Returns:
         Texto informativo sobre o tópico solicitado.
@@ -51,10 +51,10 @@ def buscar_info_associacao(topico: str) -> str:
 
 
 def buscar_faq(pergunta: str) -> str:
-    """Consulta perguntas frequentes (FAQ) da associação.
+    """Consulta perguntas frequentes (FAQ) do negócio.
 
     Args:
-        pergunta: Dúvida do associado ou lead em linguagem natural.
+        pergunta: Dúvida do cliente em linguagem natural.
 
     Returns:
         Resposta da FAQ mais relevante ou lista de perguntas disponíveis.
@@ -63,7 +63,7 @@ def buscar_faq(pergunta: str) -> str:
 
 
 def encaminhar_para_secretaria(motivo: str) -> str:
-    """Encaminha o cliente para atendimento humano da secretaria.
+    """Encaminha o cliente para atendimento humano.
 
     Use SOMENTE quando o cliente pedir humano ou a informação essencial
     não existir nas outras ferramentas.

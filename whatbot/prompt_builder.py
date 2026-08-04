@@ -1,89 +1,34 @@
-"""Build LLM system prompts with association knowledge."""
+"""Build LLM system prompts with business knowledge."""
 
 from __future__ import annotations
 
 import logging
 
-from .intent_router import (
-    INTENT_EXPERIMENTAL,
-    INTENT_FAQ,
-    INTENT_HORARIOS,
-    INTENT_MATRICULA,
-    INTENT_PRECOS,
-    IntentResult,
-)
+from .intent_router import IntentResult
 from .knowledge import get_knowledge_store
 from .session_state import SessionState
 
 logger = logging.getLogger("whatbot.prompt")
 
 
-def _chunks_for_intent(intent: IntentResult, session: SessionState) -> list[str]:
-    store = get_knowledge_store()
-    base = store.get()
-    chunks: list[str] = []
-
-    intent_name = intent.intent
-    if intent_name in {INTENT_HORARIOS, INTENT_EXPERIMENTAL, INTENT_PRECOS, INTENT_MATRICULA}:
-        sobre = base.secoes.get("sobre a associacao")
-        if sobre:
-            chunks.append(f"Sobre:\n{sobre}")
-
-    if intent_name == INTENT_HORARIOS:
-        mods = intent.modalities or session.modalidade_interesse
-        if mods:
-            for mod in mods:
-                item = store._match_modalidade(mod)
-                if item:
-                    chunks.append(item.as_text())
-        else:
-            for item in list(base.modalidades.values())[:2]:
-                chunks.append(item.as_text())
-
-    elif intent_name == INTENT_PRECOS:
-        precos = base.secoes.get("precos")
-        if precos:
-            chunks.append(f"Preços:\n{precos}")
-        matricula = base.secoes.get("matricula e pagamentos")
-        if matricula:
-            chunks.append(f"Matrícula e pagamentos:\n{matricula}")
-
-    elif intent_name == INTENT_EXPERIMENTAL or intent_name == INTENT_MATRICULA:
-        matricula = base.secoes.get("matricula e pagamentos")
-        if matricula:
-            chunks.append(f"Matrícula e pagamentos:\n{matricula}")
-        faq_key = None
-        for key in base.faq:
-            if "experimental" in key:
-                faq_key = key
-                break
-        if faq_key:
-            chunks.append(f"FAQ:\n{faq_key}: {base.faq[faq_key]}")
-
-    elif intent_name == INTENT_FAQ:
-        chunks.append(store.format_full_context_for_prompt()[:2500])
-
-    else:
-        listing = store.listar_modalidades()
-        sobre = base.secoes.get("sobre a associacao")
-        if sobre:
-            chunks.append(f"Sobre:\n{sobre}")
-        if listing:
-            chunks.append(listing)
-
-    return chunks[:3]
-
-
 def build_context_for_intent(
-    intent: IntentResult,
+    intent: IntentResult | None = None,
     session: SessionState | None = None,
 ) -> str:
-    """Return 1–3 knowledge chunks relevant to the detected intent."""
-    session = session or SessionState()
-    chunks = _chunks_for_intent(intent, session)
-    if not chunks:
-        return get_knowledge_store().format_full_context_for_prompt()
-    return "\n\n".join(chunks)
+    """Return the full knowledge context for the LLM prompt.
+
+    Always returns the complete knowledge base rather than an intent-based
+    slice: a per-intent excerpt only makes sense once the base is too large
+    to fit a prompt, and picking the slice by hand-mapped intent name (e.g.
+    "precos" -> seção "Preços") silently drops sections whenever the
+    knowledge file's structure doesn't match that hardcoded map — which is
+    exactly what happened when the KB changed from a class-schedule business
+    to a made-to-order product catalog (see docs/REVISAO_CAMADA_CONVERSACIONAL.md,
+    P0.1: greeting/unknown intents got no catalog, no prices, no FAQ at all).
+    `intent`/`session` are accepted for call-site compatibility but unused.
+    """
+    del intent, session
+    return get_knowledge_store().format_full_context_for_prompt()
 
 
 def build_enriched_system_prompt(
@@ -92,13 +37,9 @@ def build_enriched_system_prompt(
     session: SessionState | None = None,
     history_summary: str = "",
 ) -> str:
-    """Inject targeted knowledge chunks into the LLM system prompt."""
+    """Inject the full knowledge base into the LLM system prompt."""
     try:
         store = get_knowledge_store()
-        if intent is None:
-            from .intent_router import route_intent
-
-            intent = route_intent("", session or SessionState())
         context = build_context_for_intent(intent, session)
         parts = [
             system_prompt,

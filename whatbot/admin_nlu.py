@@ -90,7 +90,7 @@ _CASUAL_TEST = re.compile(
 )
 
 DEFAULT_CASUAL_TEST_MESSAGE = (
-    "Olá, quero informações sobre as atividades da associação."
+    "Olá, quero saber mais sobre os produtos e preços."
 )
 
 

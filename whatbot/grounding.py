@@ -9,7 +9,8 @@ import unicodedata
 from .claim_validator import get_claim_validator
 from .intent_router import route_intent
 from .knowledge import get_knowledge_store
-from .reply_composer import get_reply_composer
+from .knowledge_facts import get_knowledge_facts
+from .reply_composer import default_closing, get_reply_composer
 from .session_state import SessionState
 from .tools import buscar_faq, buscar_info_associacao, buscar_precos, listar_modalidades
 
@@ -94,8 +95,19 @@ _STOPWORDS = frozenset(
 )
 
 _ORG_CLAIM = re.compile(
-    r"\b(?:o|a|somos\s+(?:a|o))\s+([A-Za-zÀ-ú0-9][A-Za-zÀ-ú0-9\s]{2,30}?)\s+(?:é|e\s+uma)\b",
-    re.I,
+    # Meant to catch a fabricated business-identity claim ("O TimeVivo é uma
+    # associação..."), not any "o/a <substantivo> é" sentence — which is one
+    # of the most common constructions in Portuguese. The captured phrase
+    # is required to start with a capital letter (case-sensitive on
+    # purpose, unlike the surrounding article/verb) as a proper-noun
+    # heuristic: without it, ordinary replies like "O prazo é de até 5
+    # dias" or "O frete é calculado por pedido" matched on "prazo"/"frete"
+    # and got flagged as impersonating a fake organization — reproduced,
+    # high-frequency false positive on the *primary* reply path (every
+    # non-fallback LLM turn goes through `detect_hallucination`), found
+    # during a final pipeline sanity check in this session (see
+    # docs/REVISAO_CAMADA_CONVERSACIONAL.md).
+    r"\b(?i:o|a|somos\s+(?:a|o))\s+([A-ZÀ-Ú][A-Za-zÀ-ú0-9\s]{1,30}?)\s+(?i:é|e\s+uma)\b",
 )
 _LIST_LINE = re.compile(r"^[\-*•\d\.)]+\s*")
 _MAX_GROUNDED_REPLY_LEN = 1200
@@ -109,10 +121,6 @@ def _norm(text: str) -> str:
 
 def _knowledge_blob() -> str:
     return _norm(get_knowledge_store().format_full_context_for_prompt())
-
-
-def _registered_names_norm() -> list[str]:
-    return [_norm(name) for name in get_knowledge_store().registered_modalidade_names()]
 
 
 def _strip_list_marker(line: str) -> str:
@@ -129,10 +137,22 @@ def _line_claims_modality(line: str) -> bool:
     return bool(re.search(r"\*\*[^*]+\*\*|:\s*\S", stripped) or len(stripped) > 20)
 
 
+def _token_known(token: str, blob: str) -> bool:
+    """Loosely tolerant of simple plural/gender suffix drift (e.g. "tamanho"
+    in the KB vs. "tamanhos" in a natural-sounding reply) — a plain
+    substring check on the raw token flags harmless morphology as a
+    hallucination (docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.3)."""
+    if token in blob:
+        return True
+    if token.endswith("s") and token[:-1] in blob:
+        return True
+    return f"{token}s" in blob
+
+
 def _unknown_significant_tokens(text: str, blob: str) -> list[str]:
     unknown: list[str] = []
     for token in re.findall(r"\b[a-z]{5,}\b", _norm(text)):
-        if token in _STOPWORDS or token in blob:
+        if token in _STOPWORDS or _token_known(token, blob):
             continue
         unknown.append(token)
     return unknown
@@ -145,13 +165,19 @@ def detect_hallucination(reply: str) -> bool:
 
     blob = _knowledge_blob()
     reply_norm = _norm(reply)
-    names = _registered_names_norm()
 
     for line in reply.splitlines():
         if not _is_list_line(line) or not _line_claims_modality(line):
             continue
         line_norm = _norm(_strip_list_marker(line))
-        if any(name in line_norm for name in names):
+        significant = [
+            token
+            for token in re.findall(r"\b[a-z]{5,}\b", line_norm)
+            if token not in _STOPWORDS
+        ]
+        if not significant:
+            continue
+        if all(_token_known(token, blob) for token in significant):
             continue
         return True
 
@@ -164,9 +190,19 @@ def detect_hallucination(reply: str) -> bool:
         marker in reply_norm
         for marker in ("modalidade", "atividade", "temos", "oferece", "oferecemos")
     ):
-        unknown = _unknown_significant_tokens(reply, blob)
-        if unknown:
-            return True
+        # Only check the structured (list) part of the reply against the KB —
+        # free-flowing conversational sentences naturally reword things (e.g.
+        # "opções", "prefere", plurals) without that being a hallucinated
+        # claim. Falling back to scanning the *whole* reply when there's no
+        # list used to defeat this exact reasoning and flag good, fully
+        # grounded conversational replies as hallucinations (see
+        # docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.3 — reproduced case:
+        # "Temos miniaturas ... nos tamanhos mini (9cm) e padrão (12cm)").
+        list_text = "\n".join(line for line in reply.splitlines() if _is_list_line(line))
+        if list_text:
+            unknown = _unknown_significant_tokens(list_text, blob)
+            if unknown:
+                return True
 
     return False
 
@@ -221,12 +257,15 @@ def build_knowledge_reply(user_message: str, session: SessionState | None = None
 
     body = "\n\n".join(p.strip() for p in parts if p and p.strip())
     if not body or len(body) > _MAX_GROUNDED_REPLY_LEN:
-        return composed
+        # `composed` was already tried and rejected above for the same
+        # reason (empty or too long) — returning it here was a no-op guard
+        # that always handed back the value it had just discarded
+        # (docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.5). `None` tells the
+        # caller (`ensure_grounded_reply`) there's no short grounded
+        # alternative, so it keeps the original LLM reply instead.
+        return None
 
-    return (
-        f"{body}\n\n"
-        "Se quiser agendar aula experimental ou falar com a secretaria, é só me avisar."
-    )
+    return f"{body}\n\n{default_closing(get_knowledge_facts())}"
 
 
 def ensure_grounded_reply(

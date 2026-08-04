@@ -67,7 +67,7 @@ def update_session_state(
     state.topico_atual = intent
     if intent == "experimental":
         state.aguardando_dados_experimental = True
-    elif intent in {"precos", "horarios", "greeting", "faq"}:
+    elif intent in {"precos", "pagamento", "entrega", "matricula", "horarios", "greeting", "faq"}:
         state.aguardando_dados_experimental = False
     return state
 
@@ -82,6 +82,10 @@ def history_summary(history: List[HistoryMessage], max_turns: int = 4) -> str:
         norm = _norm(record.text)
         if any(token in norm for token in facts.intent_signals.get("precos", set())):
             topics.append("preços")
+        if any(token in norm for token in facts.intent_signals.get("pagamento", set())):
+            topics.append("pagamento")
+        if any(token in norm for token in facts.intent_signals.get("entrega", set())):
+            topics.append("entrega/prazo")
         if any(token in norm for token in facts.intent_signals.get("horarios", set())):
             topics.append("horários")
         if any(token in norm for token in facts.intent_signals.get("experimental", set())):

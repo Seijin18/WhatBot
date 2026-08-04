@@ -66,9 +66,9 @@ def wrap_fallback_reply(raw: str, reason: str = "error") -> str:
     cleaned = raw.replace("P:", "").replace("R:", "").strip()
     intro = (
         "No momento estou com instabilidade, mas consegui estas informações "
-        "oficiais da associação:\n\n"
+        "oficiais:\n\n"
     )
     outro = (
-        "\n\nDigite *quero falar com a secretaria* se precisar de ajuda humana."
+        "\n\nDigite *quero falar com um atendente* se precisar de ajuda humana."
     )
     return f"{intro}{cleaned}{outro}"

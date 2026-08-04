@@ -49,16 +49,16 @@ def strip_handover_token(model_output: str) -> str:
 
 
 def build_handover_customer_message(model_reply: str) -> str:
-    """Customer-facing message when the model requests secretariat handover."""
+    """Customer-facing message when the model requests human handover."""
     explanation = strip_handover_token(model_reply)
     if explanation:
         return (
             f"{explanation}\n\n"
-            "_Em seguida, nossa secretaria dará continuidade ao seu atendimento._"
+            "_Em seguida, um atendente humano continua o seu atendimento._"
         )
     return (
-        "Vou encaminhar você para a secretaria. "
-        "Em breve um atendente humano continuará a conversa por aqui."
+        "Vou encaminhar você para um atendente. "
+        "Em breve alguém da nossa equipe continua a conversa por aqui."
     )
 
 
@@ -86,8 +86,8 @@ def executar_handover_para_secretaria(
     prioridade = calcular_prioridade_handover(user_message or "")
 
     handover_text = customer_message or (
-        "Encaminhando você para a secretaria. "
-        "Em breve um atendente humano continuará a conversa por aqui."
+        "Encaminhando você para um atendente. "
+        "Em breve alguém da nossa equipe continua a conversa por aqui."
     )
     if not simulated:
         send_to_contact(

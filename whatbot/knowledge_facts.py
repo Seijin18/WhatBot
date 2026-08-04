@@ -276,13 +276,19 @@ def _parse_prices(base: KnowledgeBase) -> tuple[Optional[int], Optional[int], Se
                 semester = vals[0]
     if monthly is None or semester is None:
         precos = base.secoes.get("precos", "")
+        precos_norm = norm_text(precos)
         vals = extract_money_values(precos)
         known.update(vals)
-        if vals:
-            if monthly is None:
-                monthly = vals[0]
-            if semester is None and len(vals) > 1:
-                semester = vals[1]
+        # Only treat the first/second R$ values as "monthly"/"semester" plan
+        # prices when the section actually talks about plans in those terms —
+        # a plain price-per-item catalog (e.g. a product list) has no such
+        # concept, and blindly taking vals[0]/vals[1] mislabels arbitrary
+        # item prices, which then forces every price reply through the rigid
+        # template path instead of a normal LLM answer.
+        if vals and monthly is None and "mensal" in precos_norm:
+            monthly = vals[0]
+        if vals and semester is None and "semestral" in precos_norm and len(vals) > 1:
+            semester = vals[1]
     return monthly, semester, known
 
 
@@ -296,54 +302,128 @@ def _tokens_from_bullets(text: str, min_len: int = 4) -> Set[str]:
     return tokens
 
 
+# Small, curated, business-agnostic trigger vocabulary — seeded regardless
+# of KB content because these are simply the words a Portuguese-speaking
+# customer types for these intents in any small business. The previous
+# design instead dumped every word from whatever KB section/FAQ answer
+# happened to match as a "signal" for that intent, which meant e.g. a
+# product catalog written as bullet points under "Preços" turned words like
+# "correios", "prazo" and "conforme" into permanent triggers for the
+# `precos` intent — almost any message scored as pricing (see
+# docs/REVISAO_CAMADA_CONVERSACIONAL.md, P0.3).
+_BASE_INTENT_SIGNALS: Dict[str, Set[str]] = {
+    "precos": {
+        "preco", "preço", "precos", "preços", "valor", "valores", "custa",
+        "quanto custa", "quanto e", "quanto fica", "mensalidade", "plano", "planos",
+    },
+    "pagamento": {
+        "pagamento", "pagamentos", "pagar", "pago", "pix", "cartao", "cartão",
+        "parcelar", "parcelamento", "boleto", "forma de pagamento",
+    },
+    "entrega": {
+        "entrega", "entregas", "entregar", "prazo", "demora", "correios",
+        "frete", "envio", "enviar", "retirada", "retirar",
+    },
+    "matricula": {
+        "matricula", "matrícula", "inscrever", "inscricao", "inscrição",
+        "cadastrar", "encomendar", "encomenda", "pedido", "comprar",
+    },
+    "horarios": {
+        "horario", "horário", "horarios", "horários", "que horas",
+        "modalidade", "modalidades", "atividades", "o que voces tem",
+        "o que oferece",
+    },
+}
+
+# Generic question/pronoun words that show up in almost every FAQ question
+# regardless of topic — filtered out of tokens mined from FAQ questions (see
+# `_build_intent_signals` below) so they don't become accidental cross-intent
+# triggers.
+_GENERIC_QUESTION_WORDS = frozenset(
+    {
+        "que", "quem", "qual", "quais", "quanto", "quando", "como", "onde",
+        "para", "por", "com", "sem", "uma", "um", "umas", "uns", "dos", "das",
+        "meu", "minha", "meus", "minhas", "seu", "sua", "seus", "suas",
+        "ele", "ela", "eles", "elas", "isso", "essa", "esse", "essas", "esses",
+        "voces", "vcs", "tem", "sao", "esta", "estao", "pode", "podem",
+        "fazer", "ficar", "pronto", "outro", "outros", "outra", "outras",
+    }
+)
+
+
 def _build_intent_signals(base: KnowledgeBase) -> Dict[str, Set[str]]:
     signals: Dict[str, Set[str]] = defaultdict(set)
     signals["greeting"].update(_BASE_GREETING_SIGNALS)
+    for intent, tokens in _BASE_INTENT_SIGNALS.items():
+        signals[intent].update(tokens)
 
     for item in base.modalidades.values():
         for key in item.campos:
             kn = norm_text(key)
             if any(t in kn for t in ("preco", "mensal", "semestral", "valor")):
-                signals["precos"].update(
-                    {"preco", "preço", "valor", "valores", "quanto custa", "mensalidade", "plano"}
-                )
+                signals["precos"].add(kn)
             if any(t in kn for t in ("horario", "frequencia")):
-                signals["horarios"].update(
-                    {"horario", "horário", "horarios", "horários", "que horas", "quando"}
-                )
+                signals["horarios"].add(kn)
 
     matricula = base.secoes.get("matricula e pagamentos", "")
-    if matricula:
-        matricula_norm = norm_text(matricula)
-        if "experimental" in matricula_norm:
-            for line in matricula.splitlines():
-                if "experimental" in norm_text(line):
-                    signals["experimental"].update(_tokens_from_bullets(line))
-            signals["experimental"].update(
-                {"experimental", "experimentar", "aula experimental"}
-            )
-        signals["matricula"].update(
-            {t for t in _tokens_from_bullets(matricula) if any(x in t for x in ("matric", "inscri", "pagament"))}
-            | {"matricula", "matrícula", "inscrever", "cadastr"}
+    if "experimental" in norm_text(matricula):
+        signals["experimental"].update(
+            {"experimental", "experimentar", "aula experimental"}
         )
+        # Modalidade names (e.g. "judô", "yoga") are excluded from the
+        # tokens mined below: they show up on the same bullet line as
+        # "experimental" (e.g. "Aula experimental: disponível para judô e
+        # yoga...") purely because that's where the KB documents which
+        # modalidades offer a trial, not because the name itself signals
+        # "I want to book a trial" — a plain pricing question like "quanto
+        # custa o judô?" would otherwise also nudge toward `experimental`
+        # (same class of bug as P0.3, just in this section instead of
+        # Preços — docs/REVISAO_CAMADA_CONVERSACIONAL.md).
+        modalidade_name_tokens = {
+            tok
+            for item in base.modalidades.values()
+            for tok in re.findall(r"[a-z]+", norm_text(item.nome))
+        }
+        for line in matricula.splitlines():
+            if "experimental" in norm_text(line):
+                line_tokens = (
+                    _tokens_from_bullets(line)
+                    - _GENERIC_QUESTION_WORDS
+                    - modalidade_name_tokens
+                )
+                signals["experimental"].update(line_tokens)
 
-    precos = base.secoes.get("precos", "")
-    if precos:
-        signals["precos"].update(_tokens_from_bullets(precos))
-
-    for question, answer in base.faq.items():
+    # FAQ *questions* are short, on-topic phrasings of how a customer
+    # actually asks — safe to mine for extra tokens. FAQ *answers* are
+    # prose and are deliberately NOT scanned: that was the other half of
+    # the P0.3 bug (any word in a matched answer became a permanent
+    # trigger for that intent). Generic question/pronoun words (quanto,
+    # meu, para, ...) are stripped from the harvested tokens: unlike the
+    # gate check just below (which only decides *whether* this question is
+    # relevant to an intent), a leftover filler word becomes a standing
+    # trigger for that intent in *every future message* — e.g. "meu" from
+    # "Quanto custa uma miniatura do MEU pet?" would otherwise flag
+    # "meu cachorro é um golden, dá pra fazer?" as a pricing question.
+    for question in base.faq:
         qn = norm_text(question)
-        blob = f"{qn} {norm_text(answer)}"
-        if any(t in qn for t in ("preco", "custo", "valor", "quanto")):
-            signals["precos"].update(_tokens_from_bullets(question + " " + answer, 3))
+        q_tokens = _tokens_from_bullets(question, 3) - _GENERIC_QUESTION_WORDS
+        if any(t in qn for t in ("preco", "custo", "custa", "valor")):
+            signals["precos"].update(q_tokens)
+        if any(t in qn for t in ("pagar", "pagamento", "pix", "cartao", "boleto")):
+            signals["pagamento"].update(q_tokens)
+        if any(t in qn for t in ("entrega", "prazo", "demora", "envio", "frete", "correios")):
+            signals["entrega"].update(q_tokens)
         if any(t in qn for t in ("horario", "dia", "quando")):
-            signals["horarios"].update(_tokens_from_bullets(question, 3))
-        if "experimental" in blob or "agendo" in qn:
-            signals["experimental"].update(_tokens_from_bullets(question + " " + answer, 3))
-        if any(t in qn for t in ("endereco", "onde", "local", "levar", "chinelo")):
-            signals["faq"].update(_tokens_from_bullets(question, 3))
+            signals["horarios"].update(q_tokens)
+        if "experimental" in qn or "agendo" in qn:
+            signals["experimental"].update(q_tokens)
+        if any(
+            t in qn
+            for t in ("endereco", "onde", "local", "levar", "chinelo", "retirar", "retirada")
+        ):
+            signals["faq"].update(q_tokens)
         if any(t in qn for t in ("quem", "sobre", "nome", "diferenca")):
-            signals["faq"].update(_tokens_from_bullets(question, 3))
+            signals["faq"].update(q_tokens)
 
     contato = base.secoes.get("endereco e contato", "")
     if contato:
@@ -351,9 +431,7 @@ def _build_intent_signals(base: KnowledgeBase) -> Dict[str, Set[str]]:
 
     sobre = base.secoes.get("sobre a associacao", "")
     if sobre:
-        signals["faq"].update({"sobre", "quem", "associacao", "associação"})
-
-    signals["horarios"].update({"modalidade", "modalidades", "atividades", "o que voces tem", "o que oferece"})
+        signals["faq"].update({"sobre", "quem"})
 
     return {k: v for k, v in signals.items() if v}
 

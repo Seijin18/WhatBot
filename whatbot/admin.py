@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 
 from .admin_nlu import parse_admin_intent
-from .config import AUTO_REACTIVATE_HOURS
+from .config import AUTO_REACTIVATE_HOURS, get_association_phone
 from .contact_resolver import (
     extract_phone_from_text,
     find_waiting_matches,
@@ -39,7 +39,21 @@ class TargetIdentity:
     canal: str
     label: str
 
-HELP_TEXT = """*Secretaria — fale naturalmente*
+def _build_help_text() -> str:
+    # The business's own WhatsApp Business line is read from
+    # `ASSOCIATION_PHONE` (`config.get_association_phone()`) rather than
+    # hardcoded: a literal number here would silently point at a *different*
+    # business's line once this bot is redeployed for a new KB
+    # (docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.8).
+    assoc_phone = get_association_phone()
+    warning = (
+        f"\n⚠️ O número *{assoc_phone}* é a linha do WhatsApp Business. "
+        "Mensagens *de* esse app saem como *fromMe* e não simulam cliente. "
+        "Teste pelo celular pessoal admin ou `#simular`.\n"
+        if assoc_phone
+        else ""
+    )
+    return f"""*Atendimento — fale naturalmente*
 
 Exemplos:
 • *Quem está na fila?*
@@ -51,17 +65,13 @@ Se houver *duas Marias*, o bot pergunta qual delas (responda *1*, *2* ou o telef
 
 *Testar como cliente* (do seu celular admin):
 • Envie *teste*, *olá* ou *oi* — o bot simula um cliente e responde aqui
-• `#simular 5511999999999 Olá, quero judô`
+• `#simular 5511999999999 Olá, quero saber os preços`
 • `#simular Olá` (usa número de teste padrão)
-
-⚠️ O número *5511949305094* é a linha da associação (WhatsApp Business). Mensagens *de* esse app saem como *fromMe* e não simulam cliente. Teste pelo celular pessoal admin ou `#simular`.
-
+{warning}
 *Automações:*
-• Responder um cliente → sai da fila; bot reativa sozinho em *{hours}h*
+• Responder um cliente → sai da fila; bot reativa sozinho em *{AUTO_REACTIVATE_HOURS}h*
 • Alertas de fila continuam automáticos
-""".format(
-    hours=AUTO_REACTIVATE_HOURS
-)
+"""
 
 
 def _reply(router, db, admin_phone: str, contact_id: int, text: str) -> dict:
@@ -239,7 +249,7 @@ def handle_admin_message(
     intent = parse_admin_intent(text)
 
     if intent.action == "help":
-        return _reply(router, db, admin_phone, contact_id, HELP_TEXT)
+        return _reply(router, db, admin_phone, contact_id, _build_help_text())
 
     if intent.action == "list_queue":
         waiting = db.get_waiting_contacts()

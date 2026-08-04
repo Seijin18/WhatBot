@@ -16,6 +16,8 @@ class HistoryMessage(Protocol):
 INTENT_GREETING = "greeting"
 INTENT_HORARIOS = "horarios"
 INTENT_PRECOS = "precos"
+INTENT_PAGAMENTO = "pagamento"
+INTENT_ENTREGA = "entrega"
 INTENT_EXPERIMENTAL = "experimental"
 INTENT_MATRICULA = "matricula"
 INTENT_FAQ = "faq"
@@ -28,6 +30,8 @@ _LISTING_SIGNALS = frozenset(
 _INTENT_PRIORITY = (
     INTENT_EXPERIMENTAL,
     INTENT_PRECOS,
+    INTENT_PAGAMENTO,
+    INTENT_ENTREGA,
     INTENT_MATRICULA,
     INTENT_HORARIOS,
     INTENT_FAQ,

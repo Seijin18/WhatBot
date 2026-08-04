@@ -19,6 +19,19 @@ PRIORITY_KEYWORDS = [
     "preço",
     "valor",
     "quanto custa",
+    # Non-enrollment "ready to buy" signals — a customer asking to place an
+    # order is just as much a hot lead as one asking to enroll, but the
+    # original list only covered class/enrollment vocabulary (see
+    # docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.8).
+    "encomendar",
+    "encomenda",
+    "comprar",
+    "fazer pedido",
+    "quero comprar",
+    "quero encomendar",
+    "quero pedir",
+    "fechar pedido",
+    "fechar compra",
 ]
 
 

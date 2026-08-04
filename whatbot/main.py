@@ -41,9 +41,8 @@ from .domain import (
 )
 from .fallback import build_knowledge_fallback, trim_history_for_chat
 from .grounding import ensure_grounded_reply
-from .intent_router import high_risk_intents, route_intent
+from .intent_router import route_intent
 from .prompt_builder import build_enriched_system_prompt
-from .reply_composer import get_reply_composer
 from .session_state import SessionState, history_summary, update_session_state
 from .webhook import parse_evolution_payload, parse_outgoing_staff_message
 from .admin import handle_admin_message
@@ -66,7 +65,7 @@ logger = logging.getLogger("whatbot")
 
 MODEL_UNAVAILABLE_MSG = (
     "Estou com instabilidade no momento. Tente novamente em instantes "
-    "ou digite *quero falar com a secretaria* se precisar de ajuda humana."
+    "ou digite *quero falar com um atendente* se precisar de ajuda humana."
 )
 
 
@@ -374,16 +373,13 @@ def process_customer_message(
     response_mode = "llm"
     grounding_meta: Dict[str, Any] = {}
 
-    if intent_result.intent in high_risk_intents():
-        composed = get_reply_composer().compose(intent_result, text, session)
-        if composed:
-            model_reply = composed
-            response_mode = "template"
-            logger.info(
-                "Resposta template para intent=%s (alto risco factual)",
-                intent_result.intent,
-            )
-
+    # Every customer message goes to the LLM first — no intent bypasses it
+    # with a canned template. Factual correctness for high-stakes replies
+    # (prices, deadlines, etc.) is enforced *after* generation by
+    # `ensure_grounded_reply()` below, which reprompts/corrects rather than
+    # skipping the model outright (docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.2:
+    # a pre-generation template gate here previously replaced every reply for
+    # a "high risk" intent, defeating the point of having an LLM).
     if model_reply is None:
         try:
             model_reply = _llm.chat(

@@ -28,9 +28,57 @@ class KnowledgeBase:
     secoes: Dict[str, str]
     modalidades: Dict[str, Modalidade]
     faq: Dict[str, str]
+    secao_titulos: Dict[str, str] = field(default_factory=dict)
 
     def listar_modalidades(self) -> List[str]:
         return sorted(self.modalidades.keys())
+
+    def titulo_secao(self, key: str) -> str:
+        """Original heading text for a section (e.g. "Matrícula e pagamentos"),
+        keyed by its normalized form. Falls back to a title-cased version of
+        the key itself when the section isn't in the file (or, since the
+        normalized key is ASCII-folded, loses accents as a last resort)."""
+        return self.secao_titulos.get(key) or key.title()
+
+
+# Generic question/pronoun/verb words that show up in almost every FAQ
+# question regardless of topic — excluded from `buscar_faq`'s keyword
+# overlap scoring so two unrelated questions don't "match" just because
+# they're both phrased as "Vocês fazem...?" (docs/REVISAO_CAMADA_CONVERSACIONAL.md,
+# P1.4). Mirrors `knowledge_facts._GENERIC_QUESTION_WORDS` but kept
+# independent to avoid a circular import (knowledge_facts imports this
+# module, not the other way around).
+_FAQ_FILLER_WORDS = frozenset(
+    {
+        "que", "quem", "qual", "quais", "quanto", "quando", "como", "onde",
+        "para", "por", "com", "sem", "uma", "um", "umas", "uns", "dos", "das",
+        "meu", "minha", "meus", "minhas", "seu", "sua", "seus", "suas",
+        "ele", "ela", "eles", "elas", "isso", "essa", "esse", "essas", "esses",
+        "voces", "vcs", "tem", "sao", "esta", "estao", "pode", "podem",
+        "fazer", "fazem", "faz", "ficar", "pronto", "outro", "outros",
+        "outra", "outras",
+    }
+)
+
+
+def _stems_match(a: str, b: str) -> bool:
+    """Loose match tolerant of simple verb/plural drift (e.g. "entrega" vs.
+    "entregam"): true on an exact match, or when the shorter token is a
+    5+ char prefix of the longer one."""
+    if a == b:
+        return True
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    return len(shorter) >= 5 and longer.startswith(shorter)
+
+
+def _faq_content_overlap(query_tokens: set, key_tokens: set) -> int:
+    query_content = query_tokens - _FAQ_FILLER_WORDS
+    key_content = key_tokens - _FAQ_FILLER_WORDS
+    score = 0
+    for qt in query_content:
+        if any(_stems_match(qt, kt) for kt in key_content):
+            score += 1
+    return score
 
 
 def _normalize(text: str) -> str:
@@ -61,6 +109,7 @@ def _parse_markdown(text: str) -> KnowledgeBase:
         titulo = lines[0][2:].strip()
 
     secoes: Dict[str, str] = {}
+    secao_titulos: Dict[str, str] = {}
     modalidades: Dict[str, Modalidade] = {}
     faq: Dict[str, str] = {}
 
@@ -88,6 +137,7 @@ def _parse_markdown(text: str) -> KnowledgeBase:
             faq[_normalize(current_h3)] = content or current_h3
         elif current_h3 is None:
             secoes[norm_h2] = content
+            secao_titulos[norm_h2] = current_h2
 
         buffer = []
         modalidade_buffer = []
@@ -110,7 +160,11 @@ def _parse_markdown(text: str) -> KnowledgeBase:
 
     flush_section()
     return KnowledgeBase(
-        titulo=titulo, secoes=secoes, modalidades=modalidades, faq=faq
+        titulo=titulo,
+        secoes=secoes,
+        modalidades=modalidades,
+        faq=faq,
+        secao_titulos=secao_titulos,
     )
 
 
@@ -192,13 +246,20 @@ class KnowledgeStore:
         return match_modalidades_in_text(text, self.get())
 
     def listar_modalidades(self) -> str:
+        """"What do you have?" answer. A class-schedule business (with a
+        `## Modalidades` section) gets that listing; a catalog-style
+        business has no such section, so this falls back to the price
+        table instead of a bare "Nenhuma modalidade cadastrada no momento."
+        — that fallback string used to be sent to customers verbatim
+        whenever this path was reached for a business without modalidades
+        (docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.1/P1.3)."""
         base = self.get()
         if not base.modalidades:
-            return "Nenhuma modalidade cadastrada no momento."
+            return self.buscar_precos()
         lines = ["Modalidades disponíveis:"]
         for item in base.modalidades.values():
-            horarios = item.campos.get("Horários", "consultar secretaria")
-            preco = item.campos.get("Preço mensal", "consultar secretaria")
+            horarios = item.campos.get("Horários", "consultar atendimento")
+            preco = item.campos.get("Preço mensal", "consultar atendimento")
             lines.append(f"- {item.nome}: {horarios} | {preco}")
         return "\n".join(lines)
 
@@ -215,19 +276,29 @@ class KnowledgeStore:
         return base.titulo
 
     def format_grounding_rules_for_prompt(self) -> str:
-        """Behavior rules derived from the current knowledge file (not hardcoded)."""
-        base = self.get()
-        names = self.registered_modalidade_names()
-        modalidades = ", ".join(names) if names else "consulte a seção de modalidades abaixo"
+        """Behavior rules derived from the current knowledge file (not hardcoded).
+
+        Kept business-agnostic on purpose: earlier wording talked about
+        "modalidades" and fell back to "consulte a seção de modalidades
+        abaixo" (a section that may not exist in a non-class-schedule
+        business, e.g. a product catalog) — see
+        docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.8.
+        """
         label = self.association_label()
         return "\n".join(
             [
                 "REGRAS DE ATENDIMENTO:",
-                "1. Use EXCLUSIVAMENTE os dados da base abaixo — nunca invente modalidades, horários, preços ou nomes.",
-                f"2. A associação: {label}. Cite somente as modalidades cadastradas: {modalidades}.",
-                "3. Se a informação não estiver na base, diga que não tem esse dado e use [HUMAN_HANDOVER].",
-                "4. Respostas curtas (2–4 frases), tom acolhedor de WhatsApp, sem emojis.",
-                "5. Não copie rótulos técnicos (P:/R:, \"Modalidade:\") — fale como pessoa real.",
+                "1. Use EXCLUSIVAMENTE os dados da base de conhecimento abaixo — "
+                "nunca invente produtos, serviços, preços, prazos ou informações "
+                "que não estejam cadastrados.",
+                f"2. Você atende em nome de: {label}.",
+                "3. Se a informação não estiver na base, diga com naturalidade que "
+                "não tem esse dado no momento e ofereça encaminhar para atendimento "
+                "humano (use [HUMAN_HANDOVER]).",
+                "4. Respostas curtas (2–4 frases), tom acolhedor e natural de "
+                "WhatsApp — como uma pessoa da equipe respondendo, não um sistema.",
+                "5. Nunca copie rótulos técnicos da base (como \"P:\", \"R:\", "
+                "nomes de seção) — converta tudo para fala natural.",
             ]
         )
 
@@ -235,28 +306,35 @@ class KnowledgeStore:
         """Full knowledge block for LLM system prompts (single source of truth)."""
         base = self.get()
         parts = [
-            f"NOME OFICIAL DA ASSOCIAÇÃO: {base.titulo}",
+            f"NOME OFICIAL: {base.titulo}",
         ]
         sobre = base.secoes.get("sobre a associacao")
         if sobre:
-            parts.extend(["", "Sobre:", sobre])
+            parts.extend(["", f"{base.titulo_secao('sobre a associacao')}:", sobre])
         contato = base.secoes.get("endereco e contato")
         if contato:
-            parts.extend(["", "Endereço e contato:", contato])
-        parts.extend(
-            [
-                "",
-                "MODALIDADES CADASTRADAS (somente estas existem — nunca cite outras):",
-            ]
-        )
-        for item in base.modalidades.values():
-            parts.extend(["", item.as_text()])
+            parts.extend(["", f"{base.titulo_secao('endereco e contato')}:", contato])
+        # Only inject this block (and its "nunca cite outras" warning) when
+        # the KB actually has a `## Modalidades` section — otherwise this
+        # header used to appear in every single prompt with nothing under
+        # it, an unconditional domain-specific string bleeding into
+        # businesses that don't model themselves as class/schedule
+        # "modalidades" (docs/REVISAO_CAMADA_CONVERSACIONAL.md, P0.1/P1.8).
+        if base.modalidades:
+            parts.extend(
+                [
+                    "",
+                    "MODALIDADES CADASTRADAS (somente estas existem — nunca cite outras):",
+                ]
+            )
+            for item in base.modalidades.values():
+                parts.extend(["", item.as_text()])
         precos = base.secoes.get("precos")
         if precos:
-            parts.extend(["", "Preços:", precos])
+            parts.extend(["", f"{base.titulo_secao('precos')}:", precos])
         matricula = base.secoes.get("matricula e pagamentos")
         if matricula:
-            parts.extend(["", "Matrícula e pagamentos:", matricula])
+            parts.extend(["", f"{base.titulo_secao('matricula e pagamentos')}:", matricula])
         if base.faq:
             parts.append("")
             parts.append("FAQ:")
@@ -278,7 +356,7 @@ class KnowledgeStore:
             if extra:
                 text += f". Observações: {extra}"
             return text
-        return f"Horários de {item.nome} não informados. Consulte a secretaria."
+        return f"Horários de {item.nome} não informados. Consulte o atendimento."
 
     def buscar_precos(self, modalidade: str | None = None) -> str:
         base = self.get()
@@ -298,23 +376,30 @@ class KnowledgeStore:
 
         matricula = base.secoes.get("matricula e pagamentos", "")
         precos = base.secoes.get("precos", "")
-        lines = ["Tabela de preços por modalidade:"]
-        for item in base.modalidades.values():
-            mensal = item.campos.get("Preço mensal", "consultar secretaria")
-            semestral = item.campos.get("Preço semestral")
-            entry = f"- {item.nome}: {mensal}"
-            if semestral:
-                entry += f" | {semestral}"
-            lines.append(entry)
+        lines: list[str] = []
+        # Only businesses with a `## Modalidades` section (class schedules,
+        # service tiers) get this per-item table — a product catalog
+        # without that structure previously still got the heading with
+        # nothing under it (docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.1).
+        if base.modalidades:
+            lines.append("Tabela de preços por modalidade:")
+            for item in base.modalidades.values():
+                mensal = item.campos.get("Preço mensal", "consultar atendimento")
+                semestral = item.campos.get("Preço semestral")
+                entry = f"- {item.nome}: {mensal}"
+                if semestral:
+                    entry += f" | {semestral}"
+                lines.append(entry)
         if precos:
-            lines.append("")
-            lines.append("Preços:")
+            if lines:
+                lines.append("")
+            lines.append(f"{base.titulo_secao('precos')}:")
             lines.append(precos)
         if matricula:
             lines.append("")
-            lines.append("Matrícula e pagamentos:")
+            lines.append(f"{base.titulo_secao('matricula e pagamentos')}:")
             lines.append(matricula)
-        return "\n".join(lines)
+        return "\n".join(lines) if lines else "Preços não cadastrados no momento."
 
     def buscar_info(self, topico: str) -> str:
         base = self.get()
@@ -322,13 +407,13 @@ class KnowledgeStore:
 
         for key, content in base.secoes.items():
             if query in key or key in query:
-                title = key.title()
+                title = base.titulo_secao(key)
                 return f"{title}:\n{content}" if content else title
 
         if query in {"contato", "endereco", "endereço", "telefone"}:
             contato = base.secoes.get("endereco e contato")
             if contato:
-                return f"Endereço e contato:\n{contato}"
+                return f"{base.titulo_secao('endereco e contato')}:\n{contato}"
 
         if query in {"modalidade", "modalidades", "atividades", "aulas"}:
             return self.listar_modalidades()
@@ -338,39 +423,62 @@ class KnowledgeStore:
         for key, content in base.secoes.items():
             blob = f"{key} {content}".lower()
             if any(token in blob for token in query.split()):
-                hits.append(f"{key.title()}:\n{content}")
+                hits.append(f"{base.titulo_secao(key)}:\n{content}")
 
         if hits:
             return "\n\n".join(hits[:3])
 
-        topics = ", ".join(k.title() for k in base.secoes.keys())
+        topics = ", ".join(base.titulo_secao(k) for k in base.secoes.keys())
         return (
             f"Não encontrei informações sobre '{topico}'. "
             f"Tópicos disponíveis: {topics}."
         )
 
     def buscar_faq(self, pergunta: str) -> str:
+        """Best-matching FAQ entry, or an explicit "não encontrei" when
+        nothing scores a real keyword overlap.
+
+        The previous scoring used `token in key` as a substring check
+        against the *whole key string*, not per-word — so a single
+        one-or-two-letter token (e.g. "o", "de") "matched" almost any FAQ
+        key, and any match with `score > 0` was accepted. That let an
+        unrelated question win and get echoed back as if it were the
+        customer's own (e.g. "vcs tem instagram?" returning the FAQ entry
+        for delivery time) — docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.4.
+        Scoring now only counts overlap between *content* words (generic
+        ones like "você", "tem", "fazem" are excluded on both sides — they
+        matched almost every question pair and could outscore a real,
+        single-content-word match), with light tolerance for simple verb/
+        plural drift (e.g. "entrega" vs. "entregam") via a shared prefix.
+        """
         base = self.get()
         if not base.faq:
             return "FAQ não disponível no momento."
 
-        query = _normalize(pergunta)
+        query_norm = _normalize(pergunta)
+        query_tokens = {t for t in re.findall(r"[a-z0-9]+", query_norm) if len(t) >= 3}
+        if not query_tokens:
+            return self._faq_not_found(base)
+
         best_key: Optional[str] = None
         best_score = 0
-
-        for key, answer in base.faq.items():
-            score = sum(1 for token in query.split() if token in key)
-            if query in key or key in query:
-                score += 3
+        for key in base.faq:
+            key_tokens = set(re.findall(r"[a-z0-9]+", key))
+            score = _faq_content_overlap(query_tokens, key_tokens)
+            if query_norm == key:
+                score += 5
             if score > best_score:
                 best_score = score
                 best_key = key
 
-        if best_key and best_score > 0:
+        if best_key and best_score >= 1:
             for question, answer in base.faq.items():
                 if _normalize(question) == best_key:
                     return f"P: {question}\nR: {answer}"
 
+        return self._faq_not_found(base)
+
+    def _faq_not_found(self, base: KnowledgeBase) -> str:
         return (
             "Não encontrei essa pergunta no FAQ. "
             f"Perguntas frequentes: {', '.join(base.faq.keys())}."
