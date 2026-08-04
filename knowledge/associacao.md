@@ -1,105 +1,81 @@
-# Associação Desportiva e Cultural
+# Camu (@camu3d)
 
 ## Sobre a associação
 
-Agradecemos o seu contato! Somos a associação Kannon Do, uma associação desportiva e cultural com aulas de judô e yoga. Para agendar aula experimental ou matrícula, entre em contato pela secretaria ou responda com os dados solicitados na seção de aula experimental.
+Agradecemos o seu contato! Somos a Camu (@camu3d), um ateliê de colecionáveis 3D impressos, especializados em miniaturas personalizadas de pets e outros itens de decoração. Trabalhamos com impressão 3D e acabamento artesanal, feito sob encomenda.
 
 ## Endereço e contato
 
 - WhatsApp: atendimento pelo número deste canal
-- Horário da secretaria: consultar disponibilidade
-- Endereço Físico: Av. Doná Ida Cerati Magrini, 350 - Piraporinha, Diadema - SP, 09951-260. Link Maps: [https://maps.app.goo.gl/u2B4rXAbQ5qTPcu69](https://maps.app.goo.gl/u2B4rXAbQ5qTPcu69)
-
-## Modalidades
-
-### Judô infantil
-
-- Horários: Terças e quintas, das 18:30 às 19:30
-- Frequência: Aula 2x por semana (terça e quinta-feira)
-- Público-alvo: Crianças de 6 a 12 anos
-- Preço mensal: R$ 150 (1 aluno)
-- Preço semestral: R$ 840 (1 aluno)
-- Desconto: disponível para o 2º integrante da mesma família
-- Observações: Aconselhável comparecer com roupa confortável, chinelo e garrafinha de água. O chinelo é necessário para a aula de judô.
-
-### Judô adulto
-
-- Horários: Terças e quintas, das 20:00 às 21:30
-- Frequência: Aula 2x por semana (terça e quinta-feira)
-- Público-alvo: A partir de 12 anos
-- Preço mensal: R$ 150 (1 aluno)
-- Preço semestral: R$ 840 (1 aluno)
-- Desconto: disponível para o 2º integrante da mesma família
-- Observações: Aconselhável comparecer com roupa confortável, chinelo e garrafinha de água. O chinelo é necessário para a aula de judô.
-
-### Yoga
-
-- Horários: Quartas-feiras, das 19:30 às 20:30
-- Frequência: Aula 1x por semana (quarta-feira)
-- Público-alvo: Todas as idades (consultar secretaria para orientações)
-- Preço mensal: R$ 150 (1 aluno)
-- Preço semestral: R$ 840 (1 aluno)
-- Desconto: disponível para o 2º integrante da mesma família
-- Observações: Aconselhável comparecer com roupa confortável e garrafinha de água. Chinelo não é necessário para yoga.
+- Instagram: @camu3d
+- CNPJ: 67.789.848/0001-12
+- Não trabalhamos com retirada no local — todos os pedidos são enviados pelos Correios
 
 ## Preços
 
-### Judô (infantil e adulto)
+Miniatura de pet personalizada:
 
-- Aula 2x por semana (terça e quinta-feira)
-- Plano mensal: R$ 150 (1 aluno)
-- Plano semestral: R$ 840 (1 aluno)
-- Desconto para o 2º integrante da mesma família
+- Mini (9cm), cor única: R$ 39,90
+- Mini (9cm), com kit de tintas: R$ 54,90
+- Padrão (12cm), cor única: R$ 49,90
+- Padrão (12cm), com kit de tintas: R$ 64,90
+- Combo 2 pets (9cm), cor única: R$ 69,90
+- Combo 2 pets (9cm), com kit de tintas: R$ 89,90
 
-### Yoga
+Pato de tricô: R$ 24,90
 
-- Aula 1x por semana (quarta-feira)
-- Plano mensal: R$ 150 (1 aluno)
-- Plano semestral: R$ 840 (1 aluno)
-- Desconto para o 2º integrante da mesma família
+Frete: não incluso nos preços acima — calculado por pedido conforme a distância até o destino, enviado pelos Correios.
 
 ## Matrícula e pagamentos
 
-- Aula experimental: disponível para judô e yoga — preencher nome, idade, celular/telefone e dia desejado
-- Dias disponíveis para aula experimental de judô: quinta-feira (5ªf)
-- Dias disponíveis para aula experimental de yoga: quarta-feira (4ªf)
-- Planos: mensal ou semestral (valores na seção Preços e em cada modalidade)
-- Desconto familiar: consulte a secretaria para valores do 2º integrante da mesma família
+Como encomendar uma miniatura de pet personalizada:
+
+- Precisamos de 2 a 3 fotos do pet: uma de frente, uma de lado e uma de costas
+- Enquadrar bem o pet na imagem, com boa iluminação
+- Se o pet tiver alguma característica marcante (mancha, pelagem diferente, cicatriz etc.), enviar uma foto adicional focando nesse detalhe, de forma que dê pra localizar onde ela fica no corpo do pet
+- Também é preciso confirmar: tamanho desejado (mini 9cm ou padrão 12cm), se é 1 ou 2 pets (combo), e se o pedido inclui o kit de tintas ou cor única
+
+Prazo de produção e entrega:
+
+- Produção e acabamento: até 5 dias úteis após a confirmação do pedido e recebimento das fotos
+- Envio: pelos Correios, após a finalização da peça
+- O prazo de entrega depende do serviço dos Correios e da distância até o destino — não temos prazo fixo de entrega, só de produção
+
+Formas de pagamento:
+
+- Pix, na chave do CNPJ da empresa (67.789.848/0001-12)
+- Outras formas de pagamento (cartão, parcelamento) disponíveis via Mercado Pago
 
 ## FAQ
 
-### O que devo levar para a aula?
+### Quanto custa uma miniatura do meu pet?
 
-Roupa confortável e garrafinha de água são recomendados para todas as modalidades. Para judô (infantil e adulto), traga também chinelo — é necessário. Para yoga, chinelo não é necessário.
+Depende do tamanho e do acabamento. O mini (9cm) custa R$ 39,90 em cor única ou R$ 54,90 com kit de tintas. O padrão (12cm) custa R$ 49,90 em cor única ou R$ 64,90 com kit de tintas. Para 2 pets no mesmo pedido (combo 9cm), R$ 69,90 em cor única ou R$ 89,90 com kit de tintas.
 
-### Quais são os horários do judô?
+### O que é o "kit de tintas"?
 
-Judô infantil (6 a 12 anos): terças e quintas, das 18:30 às 19:30. Judô adulto (acima de 12 anos): terças e quintas, das 20:00 às 21:30.
+É a opção com pintura mais elaborada, representando melhor as cores e detalhes reais do pet, em vez de uma cor única.
 
-### Quais são os horários do yoga?
+### Quais fotos preciso mandar do meu pet?
 
-Yoga: quartas-feiras, das 19:30 às 20:30.
+2 a 3 fotos: frente, lado e costas, bem enquadradas e com boa iluminação. Se o pet tiver alguma característica marcante (mancha, pelagem diferente etc.), mande uma foto extra mostrando onde ela fica.
 
-### Como agendo uma aula experimental?
+### Quanto tempo demora para ficar pronto?
 
-Informe os seguintes dados: NOME, IDADE, CEL/TEL e o DIA desejado — quinta-feira (5ªf) para JUDÔ ou quarta-feira (4ªf) para YOGA.
+Até 5 dias úteis para produção e acabamento. Depois disso, o prazo de entrega depende dos Correios e da distância.
 
-### Em quais dias da semana há aula de judô?
+### Como faço para pagar?
 
-Todas as terças e quintas-feiras.
+Pix na chave do CNPJ da empresa, ou outras formas de pagamento (cartão, parcelamento) pelo Mercado Pago.
 
-### Em quais dias da semana há aula de yoga?
+### Vocês entregam em qualquer lugar?
 
-Todas as quartas-feiras.
+Sim, enviamos pelos Correios para qualquer endereço. O valor do frete varia de acordo com o pedido e a distância.
 
-### Preciso de chinelo?
+### Posso retirar no local?
 
-Sim, para as aulas de judô (infantil e adulto). Para yoga, chinelo não é necessário.
+Não, não oferecemos retirada — todos os pedidos são enviados pelos Correios.
 
-### Quanto custam as aulas?
+### Vocês fazem outros produtos além de miniatura de pet?
 
-Judô e yoga: plano mensal R$ 150 (1 aluno) ou plano semestral R$ 840 (1 aluno). Há desconto para o 2º integrante da mesma família — consulte a secretaria para o valor exato.
-
-### Qual a diferença entre plano mensal e semestral?
-
-O plano mensal custa R$ 150 por aluno. O plano semestral custa R$ 840 por aluno (equivalente a 6 meses com economia em relação ao mensal).
+Sim, também temos o Pato de Tricô (R$ 24,90). Outros itens do catálogo podem variar — consulte disponibilidade.
