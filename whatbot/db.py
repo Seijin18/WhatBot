@@ -227,6 +227,19 @@ class Database:
             streak INTEGER NOT NULL DEFAULT 0,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
         );
+        -- Local cache of the WhatsApp Business catalog (catalog-product-sync,
+        -- see design.md Decisão 1/2): kept in sync by the
+        -- `windmill/f/whatbot/sync_catalog.py` job, resolved with
+        -- `Database.resolve_catalog_items` so `productId`/`retailerId` never
+        -- needs a synchronous call to the Evolution API during customer
+        -- traffic.
+        CREATE TABLE IF NOT EXISTS produtos_catalogo (
+            product_id VARCHAR(64) PRIMARY KEY,
+            nome TEXT,
+            preco NUMERIC,
+            disponivel BOOLEAN,
+            last_synced_at TIMESTAMPTZ
+        );
         INSERT INTO notificacao_admin (id, pendentes_desde_ultimo_lote) VALUES (1, 0)
         ON CONFLICT (id) DO NOTHING;
         """
@@ -1241,4 +1254,82 @@ class Database:
                     )
         except Exception as e:
             self._logger.exception("Erro buscando credencial de canal: %s", e)
+            raise
+
+    # -- product catalog cache (catalog-product-sync) ----------------------
+
+    def upsert_catalog_products(self, products: list[dict]) -> None:
+        """Upsert `produtos_catalogo` by `product_id`.
+
+        Called from `whatbot.main.sync_catalog()` right after
+        `EvolutionApiClient.fetch_catalog()`. Each `product` dict is expected
+        to already carry `product_id`, `nome`, `preco`, `disponivel` (the
+        shape `fetch_catalog()` returns) — `last_synced_at` is always bumped
+        to `now()` on every run that sees the product, whether or not its
+        other fields changed, so it reflects the most recent successful sync
+        (see design.md, Decisão 2).
+        """
+        if not products:
+            return
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    for product in products:
+                        cur.execute(
+                            """
+                            INSERT INTO produtos_catalogo
+                                (product_id, nome, preco, disponivel, last_synced_at)
+                            VALUES (%s, %s, %s, %s, now())
+                            ON CONFLICT (product_id) DO UPDATE
+                            SET nome = EXCLUDED.nome,
+                                preco = EXCLUDED.preco,
+                                disponivel = EXCLUDED.disponivel,
+                                last_synced_at = now()
+                            """,
+                            (
+                                product["product_id"],
+                                product.get("nome"),
+                                product.get("preco"),
+                                product.get("disponivel"),
+                            ),
+                        )
+        except Exception as e:
+            self._logger.exception("Erro sincronizando catálogo de produtos: %s", e)
+            raise
+
+    def resolve_catalog_items(self, product_ids: list[str]) -> list[dict]:
+        """Resolve `productId`/`retailerId` values to name/price/availability.
+
+        Used by `catalog-order-capture` (enriching a captured order) and by
+        `handover-summary-for-agent` (building the handover summary). An id
+        absent from the local cache is simply omitted from the result — never
+        raises (see spec "Item desconhecido não quebra a resolução dos
+        demais").
+        """
+        if not product_ids:
+            return []
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT product_id, nome, preco, disponivel
+                        FROM produtos_catalogo
+                        WHERE product_id = ANY(%s)
+                        """,
+                        (list(product_ids),),
+                    )
+                    return [
+                        {
+                            "product_id": r[0],
+                            "nome": r[1],
+                            "preco": r[2],
+                            "disponivel": r[3],
+                        }
+                        for r in cur.fetchall()
+                    ]
+        except Exception as e:
+            self._logger.exception("Erro resolvendo itens do catálogo: %s", e)
             raise

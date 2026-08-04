@@ -172,6 +172,8 @@ class FakeDatabase:
         self.channel_credentials: Dict[str, dict] = {}
         # Mirrors `canal_envio_falhas` (critic BLOQUEADOR 1: persisted streak).
         self.send_fail_streaks: Dict[str, int] = {}
+        # Mirrors `produtos_catalogo` (catalog-product-sync).
+        self.catalog_products: Dict[str, dict] = {}
 
     # -- infra -----------------------------------------------------------
 
@@ -687,3 +689,23 @@ class FakeDatabase:
         if not row:
             return None
         return ChannelCredential(**row)
+
+    # -- product catalog cache (catalog-product-sync) ---------------------
+
+    def upsert_catalog_products(self, products: List[dict]) -> None:
+        for product in products:
+            product_id = product["product_id"]
+            self.catalog_products[product_id] = {
+                "product_id": product_id,
+                "nome": product.get("nome"),
+                "preco": product.get("preco"),
+                "disponivel": product.get("disponivel"),
+                "last_synced_at": _now(),
+            }
+
+    def resolve_catalog_items(self, product_ids: List[str]) -> List[dict]:
+        return [
+            dict(self.catalog_products[pid])
+            for pid in product_ids
+            if pid in self.catalog_products
+        ]

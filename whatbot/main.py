@@ -321,6 +321,43 @@ def check_queue(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     return {"ok": True, **run_periodic_queue_checks(_db, _router)}
 
 
+def sync_catalog() -> Dict[str, Any]:
+    """Scheduled Windmill job: refresh `produtos_catalogo` from the WhatsApp
+    Business catalog (catalog-product-sync).
+
+    Delegates to `EvolutionApiClient.fetch_catalog()` + `Database.
+    upsert_catalog_products()`. Neither call is allowed to raise out of this
+    function: a failure fetching the remote catalog *or* persisting it
+    locally is logged and reported in the return value only — the local
+    cache keeps whatever the last successful sync wrote, and no customer
+    message is ever blocked waiting on this job (see design.md, Decisão 2,
+    and spec "Catálogo sincronizado periodicamente", cenário "Falha de
+    sincronização não derruba o sistema"). `upsert_catalog_products` used to
+    run outside any `try/except` here — a single malformed row (e.g.
+    `product_id=None`) would violate the `PRIMARY KEY NOT NULL` constraint,
+    roll back the whole batch and propagate uncaught, contradicting this very
+    docstring (see critic feedback on catalog-product-sync).
+    """
+    try:
+        _init_infra()
+    except Exception as e:
+        logger.exception("Erro inicializando infra: %s", e)
+        return {"ok": False, "error": "infra_init_failed", "detail": str(e)}
+    try:
+        products = _router.client_for(WHATSAPP).fetch_catalog()
+    except Exception as e:
+        logger.exception("Erro buscando catálogo remoto; cache local mantido: %s", e)
+        return {"ok": False, "error": "fetch_catalog_failed", "detail": str(e)}
+    try:
+        _db.upsert_catalog_products(products)
+    except Exception as e:
+        logger.exception(
+            "Erro salvando catálogo local; cache mantido no estado anterior: %s", e
+        )
+        return {"ok": False, "error": "upsert_failed", "detail": str(e)}
+    return {"ok": True, "synced": len(products)}
+
+
 def process_customer_message(
     phone: str,
     text: str,
