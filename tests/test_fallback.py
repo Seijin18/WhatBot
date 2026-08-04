@@ -2,9 +2,18 @@ import unittest
 
 from whatbot.db import MessageRecord
 from whatbot.fallback import build_knowledge_fallback, trim_history_for_chat
+from tests.kb_fixtures import load_class_schedule_kb
 
 
 class TestFallback(unittest.TestCase):
+    def setUp(self) -> None:
+        # `build_knowledge_fallback` reads the process-wide `KnowledgeStore`
+        # singleton — without loading a fixture here, this test's outcome
+        # depended on whichever *other* test file happened to run first and
+        # populate that shared global state (see
+        # docs/REVISAO_CAMADA_CONVERSACIONAL.md, P2.4).
+        load_class_schedule_kb()
+
     def test_trim_duplicate_inbound(self):
         history = [
             MessageRecord(3, 1, "in", "Quero judô", None),
@@ -36,7 +45,7 @@ class TestFallback(unittest.TestCase):
         self.assertNotIn("gemini", reply.lower())
         self.assertNotIn("cota", reply.lower())
         self.assertNotIn("aistudio", reply.lower())
-        self.assertIn("secretaria", reply.lower())
+        self.assertIn("atendente", reply.lower())
 
 
 if __name__ == "__main__":

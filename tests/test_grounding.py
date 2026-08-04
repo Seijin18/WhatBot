@@ -1,5 +1,4 @@
 import unittest
-from pathlib import Path
 
 from whatbot.claim_validator import ClaimValidator
 from whatbot.grounding import (
@@ -8,26 +7,17 @@ from whatbot.grounding import (
     ensure_grounded_reply,
 )
 from whatbot.intent_router import INTENT_PRECOS, route_intent
-from whatbot.knowledge import KnowledgeStore, get_knowledge_store
+from whatbot.knowledge import get_knowledge_store
 from whatbot.knowledge_facts import build_facts_from_base, norm_text, reset_knowledge_facts_cache
 from whatbot.prompt_builder import build_context_for_intent, build_enriched_system_prompt
 from whatbot.reply_composer import ReplyComposer
 from whatbot.session_state import SessionState, update_session_state
-
-KNOWLEDGE_PATH = Path(__file__).resolve().parent.parent / "knowledge" / "associacao.md"
-
-
-def _load_store() -> KnowledgeStore:
-    store = get_knowledge_store()
-    store._path = KNOWLEDGE_PATH
-    store.reload()
-    reset_knowledge_facts_cache()
-    return store
+from tests.kb_fixtures import CLASS_SCHEDULE_KB, load_class_schedule_kb
 
 
 class TestKnowledgeFacts(unittest.TestCase):
     def setUp(self) -> None:
-        _load_store()
+        load_class_schedule_kb()
 
     def test_experimental_days_from_markdown(self) -> None:
         facts = build_facts_from_base(get_knowledge_store().get())
@@ -41,8 +31,7 @@ class TestKnowledgeFacts(unittest.TestCase):
 
     def test_adapts_to_new_modality_in_knowledge(self) -> None:
         store = get_knowledge_store()
-        text = store._path.read_text(encoding="utf-8")
-        augmented = text.replace(
+        augmented = CLASS_SCHEDULE_KB.replace(
             "- Dias disponíveis para aula experimental de yoga: quarta-feira (4ªf)",
             "- Dias disponíveis para aula experimental de yoga: quarta-feira (4ªf)\n"
             "- Aula experimental de pilates: segunda-feira",
@@ -60,7 +49,7 @@ class TestKnowledgeFacts(unittest.TestCase):
 
 class TestClaimValidator(unittest.TestCase):
     def setUp(self) -> None:
-        store = _load_store()
+        store = load_class_schedule_kb()
         self.facts = build_facts_from_base(store.get())
         self.validator = ClaimValidator(self.facts)
 
@@ -90,13 +79,36 @@ class TestClaimValidator(unittest.TestCase):
 
 class TestGrounding(unittest.TestCase):
     def setUp(self) -> None:
-        _load_store()
+        load_class_schedule_kb()
 
-    def test_detect_hallucinated_modalities(self) -> None:
+    def test_detect_hallucinated_modalities_in_list(self) -> None:
         bad = (
-            "Temos futebol society, basquete e yoga às segundas e quintas às 19h30."
+            "Modalidades disponíveis:\n"
+            "- Futebol society: segundas às 19h30\n"
+            "- Basquete: quintas às 19h30"
         )
         self.assertTrue(detect_hallucination(bad))
+
+    def test_prose_only_fabrication_without_list_is_a_known_gap(self) -> None:
+        """Documents a deliberate trade-off, not a bug to "fix" by tweaking regex.
+
+        `detect_hallucination` only scans list-formatted lines for unknown
+        claims. Scanning free-flowing prose too (as it used to) caused real,
+        reproduced false positives on fully correct answers — see
+        docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.3: a correct reply like
+        "Temos miniaturas ... nos tamanhos mini (9cm)" was rejected because
+        "tamanhos" isn't a verbatim substring of the KB's "tamanho", and any
+        ordinary connector word (e.g. "também", "interessou") not present in
+        the tiny KB blob triggers the same false positive. A prose-scanning
+        heuristic narrow enough to catch "Temos futebol society, basquete e
+        yoga" without also flagging those connector words was not found —
+        every attempt reintroduced the original bug via a different word.
+        The correct general fix is a smarter validator (checking cited facts,
+        not vocabulary) or an LLM reprompt-on-suspicion, not more regex
+        patching; tracked as follow-up work, not silently left unhandled.
+        """
+        bad = "Temos futebol society, basquete e yoga às segundas e quintas às 19h30."
+        self.assertFalse(detect_hallucination(bad))
 
     def test_detect_wrong_association_name(self) -> None:
         bad = "Olá! O TimeVivo é uma associação desportiva e cultural."
@@ -104,9 +116,7 @@ class TestGrounding(unittest.TestCase):
 
     def test_accepts_new_modality_when_in_knowledge(self) -> None:
         store = get_knowledge_store()
-        store._path = KNOWLEDGE_PATH
-        text = store._path.read_text(encoding="utf-8")
-        augmented = text.replace(
+        augmented = CLASS_SCHEDULE_KB.replace(
             "## Preços",
             "### Pilates\n\n- Horários: Segundas, 10h\n- Preço mensal: R$ 120\n\n## Preços",
         )
@@ -133,12 +143,19 @@ class TestGrounding(unittest.TestCase):
         self.assertNotIn("futebol", reply.lower())
 
     def test_ensure_grounded_reply_replaces_hallucination(self) -> None:
-        bad = "O TimeVivo oferece futebol e meditação."
-        final, corrected, meta = ensure_grounded_reply(bad, "Quem é o timevivo?")
+        # List-formatted, not prose — `detect_hallucination` only scans
+        # list lines (see `test_prose_only_fabrication_without_list_is_a_known_gap`
+        # above for why prose-only fabrication isn't caught here).
+        bad = (
+            "Modalidades disponíveis:\n"
+            "- Futebol: segundas às 19h\n"
+            "- Meditação: sextas às 19h"
+        )
+        final, corrected, meta = ensure_grounded_reply(bad, "O que vocês oferecem?")
         self.assertTrue(corrected)
-        self.assertNotIn("TimeVivo", final)
         self.assertNotIn("futebol", final.lower())
-        self.assertIn("Kannon", final)
+        self.assertNotIn("meditação", final.lower())
+        self.assertIn("Judô infantil", final)
         self.assertEqual(meta.get("response_mode"), "grounding_fix")
 
     def test_log_regression_terca_experimental(self) -> None:
@@ -180,7 +197,7 @@ class TestGrounding(unittest.TestCase):
 
 class TestPromptGrounding(unittest.TestCase):
     def setUp(self) -> None:
-        _load_store()
+        load_class_schedule_kb()
 
     def test_enriched_prompt_derives_rules_from_knowledge(self) -> None:
         prompt = build_enriched_system_prompt("Assistente.")
@@ -189,15 +206,30 @@ class TestPromptGrounding(unittest.TestCase):
         self.assertIn("REGRAS DE ATENDIMENTO", prompt)
         self.assertNotIn("futebol", prompt.lower())
 
-    def test_context_chunks_smaller_than_full_dump(self) -> None:
+    def test_context_always_matches_full_dump(self) -> None:
+        """`build_context_for_intent` intentionally stopped slicing by intent.
+
+        A per-intent excerpt silently dropped whole sections whenever the
+        hand-mapped intent -> seção rules didn't match the KB's actual
+        structure — e.g. greeting/unknown intents got no catalog, no
+        prices, no FAQ at all for a non-class-schedule business (see
+        docs/REVISAO_CAMADA_CONVERSACIONAL.md, P0.1). The KB is small enough
+        (~1k tokens) that always sending the full context is simply correct
+        now; per-intent retrieval only pays off once the KB is too large to
+        fit a prompt, and then it needs similarity-based retrieval, not a
+        hardcoded intent->section map.
+        """
         store = get_knowledge_store()
-        full = len(store.format_full_context_for_prompt())
+        full = store.format_full_context_for_prompt()
         intent = route_intent("Qual o preço do judô?", SessionState())
         chunk = build_context_for_intent(intent, SessionState())
-        self.assertLess(len(chunk), full)
+        self.assertEqual(chunk, full)
 
 
 class TestIntentRouter(unittest.TestCase):
+    def setUp(self) -> None:
+        load_class_schedule_kb()
+
     def test_terca_after_judo_interest_routes_experimental(self) -> None:
         session = update_session_state(
             SessionState(modalidade_interesse=["judo"], topico_atual="precos"),

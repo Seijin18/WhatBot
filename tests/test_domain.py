@@ -1,9 +1,18 @@
 import unittest
 
 from whatbot import domain, tools
+from tests.kb_fixtures import load_class_schedule_kb
 
 
 class TestDomainFunctions(unittest.TestCase):
+    def setUp(self) -> None:
+        # `tools.buscar_horarios_turmas` reads the process-wide
+        # `KnowledgeStore` singleton — without loading a fixture here,
+        # this test's outcome depended on whichever *other* test file
+        # happened to run first and populate that shared global state
+        # (see docs/REVISAO_CAMADA_CONVERSACIONAL.md, P2.4).
+        load_class_schedule_kb()
+
     def test_buscar_horarios_turmas_known(self):
         res = tools.buscar_horarios_turmas("yoga")
         self.assertIn("19:30", res)
@@ -44,7 +53,7 @@ class TestDomainFunctions(unittest.TestCase):
             "Não tenho o valor da mensalidade na base.\n[HUMAN_HANDOVER]"
         )
         self.assertIn("Não tenho o valor", msg)
-        self.assertIn("secretaria dará continuidade", msg)
+        self.assertIn("atendente humano", msg)
         self.assertNotIn("[HUMAN_HANDOVER]", msg)
 
     def test_strip_handover_token(self):
