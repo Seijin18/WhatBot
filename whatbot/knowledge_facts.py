@@ -73,11 +73,11 @@ def extract_money_values(text: str) -> List[int]:
     return values
 
 
-def match_modalidades_in_text(text: str, base: KnowledgeBase) -> List[str]:
-    """Return registered modalidade names mentioned in text (longest match first)."""
+def match_items_in_text(text: str, base: KnowledgeBase) -> List[str]:
+    """Return registered item names mentioned in text (longest match first)."""
     n = norm_text(text)
     hits: list[tuple[int, str]] = []
-    for item in base.modalidades.values():
+    for item in base.itens.values():
         name_norm = norm_text(item.nome)
         score = 0
         if name_norm in n:
@@ -99,12 +99,12 @@ def match_modalidades_in_text(text: str, base: KnowledgeBase) -> List[str]:
     return ordered
 
 
-def _link_label_to_modalidades(label: str, base: KnowledgeBase) -> List[str]:
-    matched = match_modalidades_in_text(label, base)
+def _link_label_to_items(label: str, base: KnowledgeBase) -> List[str]:
+    matched = match_items_in_text(label, base)
     if matched:
         return matched
     label_norm = norm_text(label)
-    for item in base.modalidades.values():
+    for item in base.itens.values():
         name_norm = norm_text(item.nome)
         label_tokens = [t for t in label_norm.split() if len(t) >= 4]
         name_tokens = [t for t in name_norm.split() if len(t) >= 4]
@@ -119,10 +119,10 @@ class ExperimentalSlot:
 
     label: str
     days: List[str]
-    modalidades: List[str]
+    itens: List[str]
 
     def primary_name(self) -> str:
-        return self.modalidades[0] if self.modalidades else self.label
+        return self.itens[0] if self.itens else self.label
 
 
 @dataclass
@@ -130,9 +130,9 @@ class KnowledgeFacts:
     """Canonical facts extracted from the knowledge base."""
 
     business_name: str
-    modalidade_names: List[str]
+    item_names: List[str]
     experimental_slots: List[ExperimentalSlot] = field(default_factory=list)
-    regular_days_by_modalidade: Dict[str, List[str]] = field(default_factory=dict)
+    regular_days_by_item: Dict[str, List[str]] = field(default_factory=dict)
     monthly_price: Optional[int] = None
     semester_price: Optional[int] = None
     known_plan_prices: Set[int] = field(default_factory=set)
@@ -148,51 +148,51 @@ class KnowledgeFacts:
             risks.add("precos")
         return frozenset(risks)
 
-    def match_modalidades(self, text: str) -> List[str]:
+    def match_items(self, text: str) -> List[str]:
         from .knowledge import get_knowledge_store
 
-        return match_modalidades_in_text(text, get_knowledge_store().get())
+        return match_items_in_text(text, get_knowledge_store().get())
 
-    def experimental_days_for(self, modality_ref: str) -> List[str]:
-        ref = norm_text(modality_ref)
+    def experimental_days_for(self, item_ref: str) -> List[str]:
+        ref = norm_text(item_ref)
         for slot in self.experimental_slots:
             if ref == norm_text(slot.label):
                 return slot.days
-            for name in slot.modalidades:
+            for name in slot.itens:
                 if ref == norm_text(name) or ref in norm_text(name) or norm_text(name) in ref:
                     return slot.days
         for slot in self.experimental_slots:
-            for name in slot.modalidades:
+            for name in slot.itens:
                 if any(t in ref for t in norm_text(name).split() if len(t) >= 4):
                     return slot.days
         return []
 
-    def resolve_modalidades(
+    def resolve_items(
         self,
         text: str,
-        session_modalidades: Optional[List[str]] = None,
+        session_items: Optional[List[str]] = None,
     ) -> List[str]:
-        found = self.match_modalidades(text)
-        if session_modalidades:
-            for name in session_modalidades:
+        found = self.match_items(text)
+        if session_items:
+            for name in session_items:
                 if name not in found:
                     found.append(name)
         return found
 
-    def primary_modalidade(
+    def primary_item(
         self,
         text: str,
-        session_modalidades: Optional[List[str]] = None,
+        session_items: Optional[List[str]] = None,
     ) -> Optional[str]:
-        mods = self.resolve_modalidades(text, session_modalidades)
-        return mods[0] if mods else None
+        items = self.resolve_items(text, session_items)
+        return items[0] if items else None
 
-    def experimental_slot_for(self, modality_ref: str) -> Optional[ExperimentalSlot]:
-        ref = norm_text(modality_ref)
+    def experimental_slot_for(self, item_ref: str) -> Optional[ExperimentalSlot]:
+        ref = norm_text(item_ref)
         for slot in self.experimental_slots:
             if ref == norm_text(slot.label):
                 return slot
-            for name in slot.modalidades:
+            for name in slot.itens:
                 if ref == norm_text(name) or ref in norm_text(name):
                     return slot
         return None
@@ -229,7 +229,7 @@ def _parse_experimental_slots(como_comprar_text: str, base: KnowledgeBase) -> Li
             ExperimentalSlot(
                 label=label,
                 days=days,
-                modalidades=_link_label_to_modalidades(label, base),
+                itens=_link_label_to_items(label, base),
             )
         )
     return slots
@@ -237,7 +237,7 @@ def _parse_experimental_slots(como_comprar_text: str, base: KnowledgeBase) -> Li
 
 def _parse_regular_days(base: KnowledgeBase) -> Dict[str, List[str]]:
     result: Dict[str, List[str]] = {}
-    for item in base.modalidades.values():
+    for item in base.itens.values():
         freq = item.campos.get("Frequência", "")
         horarios = item.campos.get("Horários", "")
         days = extract_days(f"{freq} {horarios}")
@@ -250,7 +250,7 @@ def _parse_regular_days(base: KnowledgeBase) -> Dict[str, List[str]]:
         days = extract_days(answer)
         if not days:
             continue
-        linked = match_modalidades_in_text(f"{question} {answer}", base)
+        linked = match_items_in_text(f"{question} {answer}", base)
         if linked:
             for name in linked:
                 result.setdefault(name, days)
@@ -263,7 +263,7 @@ def _parse_prices(base: KnowledgeBase) -> tuple[Optional[int], Optional[int], Se
     monthly: Optional[int] = None
     semester: Optional[int] = None
     known: set[int] = set()
-    for item in base.modalidades.values():
+    for item in base.itens.values():
         for key, value in item.campos.items():
             kn = norm_text(key)
             vals = extract_money_values(value)
@@ -330,6 +330,12 @@ _BASE_INTENT_SIGNALS: Dict[str, Set[str]] = {
     },
     "horarios": {
         "horario", "horário", "horarios", "horários", "que horas",
+        # "modalidade"/"modalidades" are business-vocabulary trigger words:
+        # a customer of a class-schedule business (e.g. a sports academy)
+        # types these literal Portuguese words to ask "what do you have?" —
+        # kept as content even though the internal schema/identifier this
+        # code uses for a registered offering is `Item`, not `Modalidade`
+        # (see tests/test_no_modalidade_leftovers.py).
         "modalidade", "modalidades", "atividades", "o que voces tem",
         "o que oferece",
     },
@@ -357,7 +363,7 @@ def _build_intent_signals(base: KnowledgeBase) -> Dict[str, Set[str]]:
     for intent, tokens in _BASE_INTENT_SIGNALS.items():
         signals[intent].update(tokens)
 
-    for item in base.modalidades.values():
+    for item in base.itens.values():
         for key in item.campos:
             kn = norm_text(key)
             if any(t in kn for t in ("preco", "mensal", "semestral", "valor")):
@@ -370,18 +376,18 @@ def _build_intent_signals(base: KnowledgeBase) -> Dict[str, Set[str]]:
         signals["experimental"].update(
             {"experimental", "experimentar", "aula experimental"}
         )
-        # Modalidade names (e.g. "judô", "yoga") are excluded from the
-        # tokens mined below: they show up on the same bullet line as
+        # Item names (e.g. "judô", "yoga") are excluded from the tokens
+        # mined below: they show up on the same bullet line as
         # "experimental" (e.g. "Aula experimental: disponível para judô e
         # yoga...") purely because that's where the KB documents which
-        # modalidades offer a trial, not because the name itself signals
-        # "I want to book a trial" — a plain pricing question like "quanto
-        # custa o judô?" would otherwise also nudge toward `experimental`
-        # (same class of bug as P0.3, just in this section instead of
-        # Preços — docs/REVISAO_CAMADA_CONVERSACIONAL.md).
-        modalidade_name_tokens = {
+        # itens offer a trial, not because the name itself signals "I want
+        # to book a trial" — a plain pricing question like "quanto custa o
+        # judô?" would otherwise also nudge toward `experimental` (same
+        # class of bug as P0.3, just in this section instead of Preços —
+        # docs/REVISAO_CAMADA_CONVERSACIONAL.md).
+        item_name_tokens = {
             tok
-            for item in base.modalidades.values()
+            for item in base.itens.values()
             for tok in re.findall(r"[a-z]+", norm_text(item.nome))
         }
         for line in como_comprar.splitlines():
@@ -389,7 +395,7 @@ def _build_intent_signals(base: KnowledgeBase) -> Dict[str, Set[str]]:
                 line_tokens = (
                     _tokens_from_bullets(line)
                     - _GENERIC_QUESTION_WORDS
-                    - modalidade_name_tokens
+                    - item_name_tokens
                 )
                 signals["experimental"].update(line_tokens)
 
@@ -441,9 +447,9 @@ def build_facts_from_base(base: KnowledgeBase) -> KnowledgeFacts:
     monthly, semester, known = _parse_prices(base)
     return KnowledgeFacts(
         business_name=base.titulo,
-        modalidade_names=[item.nome for item in base.modalidades.values()],
+        item_names=[item.nome for item in base.itens.values()],
         experimental_slots=_parse_experimental_slots(como_comprar, base),
-        regular_days_by_modalidade=_parse_regular_days(base),
+        regular_days_by_item=_parse_regular_days(base),
         monthly_price=monthly,
         semester_price=semester,
         known_plan_prices=known,

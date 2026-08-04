@@ -16,9 +16,9 @@ Texto livre...
 - Endereço: ...
 - Telefone: ...
 
-## Modalidades
+## Itens
 
-### Nome do produto/serviço/modalidade
+### Nome do produto/serviço/item
 - Horários: ...
 - Preço mensal: ...
 - Público-alvo: ...
@@ -33,11 +33,11 @@ Texto ou lista com taxas, formas de pagamento, documentos...
 Resposta...
 ```
 
-A seção `## Modalidades` é opcional — negócios sem agenda de aulas/turmas
+A seção `## Itens` é opcional — negócios sem agenda de aulas/turmas
 (ex.: catálogo de produtos sob encomenda) simplesmente não a incluem; o bot
 usa a tabela de `## Preços` como referência principal nesse caso.
 
-## Campos reconhecidos nas modalidades
+## Campos reconhecidos nos itens
 
 Use estes rótulos (com dois-pontos) para que as ferramentas encontrem os dados:
 
@@ -52,8 +52,8 @@ O Gemini consulta estas funções antes de responder:
 
 | Ferramenta | Uso |
 |------------|-----|
-| `listar_modalidades` | Lista todos os produtos/serviços/modalidades |
-| `buscar_horarios_turmas` | Horários de uma modalidade |
+| `listar_itens` | Lista todos os produtos/serviços/itens |
+| `buscar_horarios_turmas` | Horários de um item |
 | `buscar_precos` | Preços e regras de compra/pagamento |
 | `buscar_info_negocio` | Endereço, contato, sobre, etc. |
 | `buscar_faq` | Perguntas frequentes |

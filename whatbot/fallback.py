@@ -8,7 +8,7 @@ from .tools import (
     buscar_horarios_turmas,
     buscar_info_negocio,
     buscar_precos,
-    listar_modalidades,
+    listar_itens,
 )
 
 
@@ -27,30 +27,30 @@ def build_knowledge_fallback(user_message: str, reason: str = "error") -> str | 
     facts = get_knowledge_facts()
     norm = norm_text(user_message)
     parts: list[str] = []
-    modalities = facts.match_modalidades(user_message)
+    items = facts.match_items(user_message)
     price_signals = facts.intent_signals.get("precos", set())
     horario_signals = facts.intent_signals.get("horarios", set())
     faq_signals = facts.intent_signals.get("faq", set())
 
-    if modalities:
-        for mod in modalities:
-            parts.append(buscar_horarios_turmas(mod))
+    if items:
+        for item in items:
+            parts.append(buscar_horarios_turmas(item))
         if any(token in norm for token in price_signals):
-            for mod in modalities[:2]:
-                parts.append(buscar_precos(mod))
+            for item in items[:2]:
+                parts.append(buscar_precos(item))
     elif any(token in norm for token in price_signals):
         parts.append(buscar_precos(""))
     elif any(token in norm for token in faq_signals if token in {"endereco", "endereço", "onde", "local"}):
         parts.append(buscar_info_negocio("endereço"))
     elif any(token in norm for token in horario_signals):
-        parts.append(listar_modalidades())
+        parts.append(listar_itens())
     else:
         faq = buscar_faq(user_message)
         if faq and "não encontrei" not in faq.lower() and not faq.strip().startswith("P:"):
             parts.append(faq)
 
     if not parts:
-        listing = listar_modalidades()
+        listing = listar_itens()
         if listing:
             parts.append(listing)
 

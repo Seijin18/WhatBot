@@ -7,14 +7,14 @@ a sports-class association to a made-to-order product catalog (see
 docs/REVISAO_CAMADA_CONVERSACIONAL.md, P2.4). These two fixtures cover the
 two KB *shapes* the code is meant to support:
 
-- `CLASS_SCHEDULE_KB`: a business with a `## Modalidades` section (class
+- `CLASS_SCHEDULE_KB`: a business with a `## Itens` section (class
   schedules, per-student monthly/semester plans, an "aula experimental"
   booking flow) — exercises `experimental_slots`, day-of-week validation,
   and the monthly/semester price-plan `ClaimValidator` rules.
-- `CATALOG_KB`: a business with no `## Modalidades` section (a flat product
+- `CATALOG_KB`: a business with no `## Itens` section (a flat product
   catalog under "Preços", made-to-order, no class schedule) — exercises
-  every "no modalidades" fallback path fixed in this session (intent
-  routing, FAQ matching, reply composition).
+  every "no itens" fallback path fixed in this session (intent routing,
+  FAQ matching, reply composition).
 
 Use `load_class_schedule_kb()` / `load_catalog_kb()` in `setUp` — they load
 straight into the process-wide `KnowledgeStore` singleton via
@@ -38,7 +38,7 @@ Agradecemos o seu contato! Somos a associação Kannon Do, uma associação desp
 - WhatsApp: atendimento pelo número deste canal
 - Endereço Físico: Av. Teste, 350 - Bairro Teste, Cidade Teste - TS, 00000-000
 
-## Modalidades
+## Itens
 
 ### Judô infantil
 

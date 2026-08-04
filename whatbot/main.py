@@ -461,7 +461,7 @@ def process_customer_message(
         else SessionState.from_dict(contact.session_state or {})
     )
     intent_result = route_intent(text, session, history)
-    session = update_session_state(session, text, intent_result.intent, history)
+    session = update_session_state(session, intent_result.intent, intent_result.items)
     hist_summary = history_summary(history)
 
     system_prompt = build_enriched_system_prompt(

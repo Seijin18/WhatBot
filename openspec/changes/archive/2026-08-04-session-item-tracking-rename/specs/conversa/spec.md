@@ -1,3 +1,8 @@
+## RENAMED Requirements
+
+- FROM: `### Requirement: Degradação graciosa sem conceito de modalidades`
+- TO: `### Requirement: Degradação graciosa sem conceito de itens`
+
 ## MODIFIED Requirements
 
 ### Requirement: Degradação graciosa sem conceito de itens

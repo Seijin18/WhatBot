@@ -54,13 +54,13 @@ def _is_price_table(text: str) -> bool:
     return "tabela de precos" in norm or norm.count("r$") >= 2
 
 
-def _infer_modalities(text: str, session: SessionState, facts: KnowledgeFacts) -> List[str]:
-    mods = facts.match_modalidades(text)
-    if not mods and session.modalidade_interesse:
-        mods = list(session.modalidade_interesse)
-    if not mods and facts.experimental_slots:
-        mods = [facts.experimental_slots[0].primary_name()]
-    return mods
+def _infer_items(text: str, session: SessionState, facts: KnowledgeFacts) -> List[str]:
+    items = facts.match_items(text)
+    if not items and session.item_interesse:
+        items = list(session.item_interesse)
+    if not items and facts.experimental_slots:
+        items = [facts.experimental_slots[0].primary_name()]
+    return items
 
 
 @dataclass
@@ -91,9 +91,9 @@ class ClaimValidator:
                 if not _schedules_experimental_on_day(sentence):
                     continue
                 days = extract_days(sentence)
-                modalities = _infer_modalities(f"{sentence} {user_message}", session, self._facts)
-                for mod in modalities:
-                    allowed = self._facts.experimental_days_for(mod)
+                items = _infer_items(f"{sentence} {user_message}", session, self._facts)
+                for item in items:
+                    allowed = self._facts.experimental_days_for(item)
                     if not allowed:
                         continue
                     for day in days:
@@ -101,7 +101,7 @@ class ClaimValidator:
                             continue
                         allowed_label = ", ".join(day_label(d) for d in allowed)
                         violations.append(
-                            f"Aula experimental de {mod}: dia "
+                            f"Aula experimental de {item}: dia "
                             f"{day_label(day)} não permitido (apenas {allowed_label})"
                         )
                         codes.append("experimental_wrong_day")
@@ -117,7 +117,7 @@ class ClaimValidator:
         if money and monthly and monthly in money and not _is_price_table(body):
             has_plan_context = any(
                 t in reply_norm
-                for t in ("mensal", "semestral", "plano", "tabela", "modalidade")
+                for t in ("mensal", "semestral", "plano", "tabela", "item")
             )
             if _claims_experimental_price(body):
                 violations.append(

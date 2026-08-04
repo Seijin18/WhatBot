@@ -29,7 +29,7 @@ class TestKnowledgeFacts(unittest.TestCase):
         self.assertIn("experimental", facts.high_risk_intents)
         self.assertIn("precos", facts.high_risk_intents)
 
-    def test_adapts_to_new_modality_in_knowledge(self) -> None:
+    def test_adapts_to_new_item_in_knowledge(self) -> None:
         store = get_knowledge_store()
         augmented = CLASS_SCHEDULE_KB.replace(
             "- Dias disponíveis para aula experimental de yoga: quarta-feira (4ªf)",
@@ -44,7 +44,7 @@ class TestKnowledgeFacts(unittest.TestCase):
         facts = build_facts_from_base(store.get())
         self.assertTrue(any("pilates" in norm_text(slot.label) for slot in facts.experimental_slots))
         self.assertEqual(facts.experimental_days_for("Pilates"), ["segunda"])
-        self.assertIn("Pilates", facts.match_modalidades("quero pilates"))
+        self.assertIn("Pilates", facts.match_items("quero pilates"))
 
 
 class TestClaimValidator(unittest.TestCase):
@@ -54,7 +54,7 @@ class TestClaimValidator(unittest.TestCase):
         self.validator = ClaimValidator(self.facts)
 
     def test_rejects_experimental_on_tuesday_with_price(self) -> None:
-        session = SessionState(modalidade_interesse=["judo"], topico_atual="experimental")
+        session = SessionState(item_interesse=["judo"], topico_atual="experimental")
         reply = (
             "Para a aula experimental de judô na terça-feira, você pode comparecer às 18:30. "
             "A aula experimental custa R$ 150 por aluno."
@@ -81,7 +81,7 @@ class TestGrounding(unittest.TestCase):
     def setUp(self) -> None:
         load_class_schedule_kb()
 
-    def test_detect_hallucinated_modalities_in_list(self) -> None:
+    def test_detect_hallucinated_items_in_list(self) -> None:
         bad = (
             "Modalidades disponíveis:\n"
             "- Futebol society: segundas às 19h30\n"
@@ -114,7 +114,7 @@ class TestGrounding(unittest.TestCase):
         bad = "Olá! O TimeVivo é uma associação desportiva e cultural."
         self.assertTrue(detect_hallucination(bad))
 
-    def test_accepts_new_modality_when_in_knowledge(self) -> None:
+    def test_accepts_new_item_when_in_knowledge(self) -> None:
         store = get_knowledge_store()
         augmented = CLASS_SCHEDULE_KB.replace(
             "## Preços",
@@ -133,7 +133,7 @@ class TestGrounding(unittest.TestCase):
         self.assertNotIn("TimeVivo", reply)
         self.assertNotIn("futebol", reply.lower())
 
-    def test_build_knowledge_reply_lists_only_real_modalities(self) -> None:
+    def test_build_knowledge_reply_lists_only_real_items(self) -> None:
         reply = build_knowledge_reply("Que modalidades você tem?")
         self.assertIsNotNone(reply)
         assert reply is not None
@@ -160,7 +160,7 @@ class TestGrounding(unittest.TestCase):
 
     def test_log_regression_terca_experimental(self) -> None:
         session = SessionState(
-            modalidade_interesse=["judo"],
+            item_interesse=["judo"],
             topico_atual="precos",
             aguardando_dados_experimental=False,
         )
@@ -183,7 +183,7 @@ class TestGrounding(unittest.TestCase):
         self.assertNotIn("experimental de judô é R$ 150", final.lower())
 
     def test_log_regression_judo_e_yoga_precos(self) -> None:
-        session = SessionState(modalidade_interesse=["judo", "yoga"], topico_atual="precos")
+        session = SessionState(item_interesse=["judo", "yoga"], topico_atual="precos")
         intent = route_intent("Do judo e do yoga?", session)
         self.assertEqual(intent.intent, INTENT_PRECOS)
         composer = ReplyComposer(build_facts_from_base(get_knowledge_store().get()))
@@ -232,9 +232,9 @@ class TestIntentRouter(unittest.TestCase):
 
     def test_terca_after_judo_interest_routes_experimental(self) -> None:
         session = update_session_state(
-            SessionState(modalidade_interesse=["judo"], topico_atual="precos"),
-            "Quero na terça feira",
+            SessionState(item_interesse=["judo"], topico_atual="precos"),
             "precos",
+            [],
         )
         intent = route_intent("Quero na terça feira", session)
         self.assertEqual(intent.intent, "experimental")

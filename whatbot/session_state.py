@@ -19,7 +19,7 @@ def _norm(text: str) -> str:
 
 @dataclass
 class SessionState:
-    modalidade_interesse: List[str] = field(default_factory=list)
+    item_interesse: List[str] = field(default_factory=list)
     topico_atual: str | None = None
     aguardando_dados_experimental: bool = False
 
@@ -31,34 +31,36 @@ class SessionState:
         if not data:
             return cls()
         return cls(
-            modalidade_interesse=list(data.get("modalidade_interesse") or []),
+            item_interesse=list(data.get("item_interesse") or []),
             topico_atual=data.get("topico_atual"),
             aguardando_dados_experimental=bool(
                 data.get("aguardando_dados_experimental", False)
             ),
         )
 
-    def primary_modalidade(self) -> str | None:
-        return self.modalidade_interesse[0] if self.modalidade_interesse else None
+    def primary_item(self) -> str | None:
+        return self.item_interesse[0] if self.item_interesse else None
 
 
 def update_session_state(
     state: SessionState,
-    user_message: str,
     intent: str,
-    history: Optional[List[HistoryMessage]] = None,
+    items: Optional[List[str]] = None,
 ) -> SessionState:
-    """Refresh session fields from the latest user turn and recent history."""
-    facts = get_knowledge_facts()
-    modalities = facts.match_modalidades(user_message)
-    if not modalities and history:
-        for record in history[:6]:
-            if record.direction == "in":
-                modalities.extend(facts.match_modalidades(record.text))
-    modalities = list(dict.fromkeys(modalities))
+    """Refresh session fields from the intent/items already resolved by
+    `route_intent` for the current turn.
 
-    if modalities:
-        state.modalidade_interesse = modalities
+    Deliberately does NOT recompute items from `user_message`/`history` on
+    its own — that used to call `KnowledgeFacts.match_items` (then still
+    named `match_modalidades`) a second time, independently of
+    `route_intent`, with its own fallback that scanned the last 6 history
+    messages. Both heuristics ran on the same turn and could disagree about
+    what the customer showed interest in; the caller (`whatbot/main.py`)
+    now passes the single `IntentResult` already computed by `route_intent`
+    instead.
+    """
+    if items:
+        state.item_interesse = list(dict.fromkeys(items))
     state.topico_atual = intent
     if intent == "experimental":
         state.aguardando_dados_experimental = True
@@ -85,7 +87,7 @@ def history_summary(history: List[HistoryMessage], max_turns: int = 4) -> str:
             topics.append("horários")
         if any(token in norm for token in facts.intent_signals.get("experimental", set())):
             topics.append("aula experimental")
-        topics.extend(facts.match_modalidades(record.text))
+        topics.extend(facts.match_items(record.text))
     if not topics:
         return ""
     unique = list(dict.fromkeys(topics))
