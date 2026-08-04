@@ -8,12 +8,12 @@
       }
     },
     "context-mode": {
-      "command": "npx",
-      "args": ["-y", "context-mode"]
+      "command": "${HOME}/.npm-global/bin/context-mode",
+      "args": []
     },
     "codebase-memory": {
-      "command": "npx",
-      "args": ["-y", "codebase-memory-mcp"]
+      "command": "${HOME}/.npm-global/bin/codebase-memory-mcp",
+      "args": []
     }
   }
 }
