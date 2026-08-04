@@ -17,9 +17,22 @@ def main(
 ) -> Dict[str, Any]:
     """Webhook Windmill: recebe payload da Evolution API e executa o WhatBot."""
     import sys
+    from pathlib import Path
 
     if "/whatbot" not in sys.path:
         sys.path.insert(0, "/whatbot")
+
+    # Carrega o .env ANTES de importar whatbot.config/whatbot.main: esses
+    # módulos leem variáveis de ambiente em constantes no nível do módulo,
+    # então precisam encontrar os valores certos já no processo no momento
+    # do import (bootstrap_env() sozinho, chamado depois do import, chega
+    # tarde demais para essas constantes).
+    from dotenv import load_dotenv
+
+    for _env_path in (Path("/whatbot/.env"), Path(".env")):
+        if _env_path.exists():
+            load_dotenv(_env_path, override=False)
+            break
 
     from whatbot.config import bootstrap_env
     from whatbot.main import main as whatbot_main
