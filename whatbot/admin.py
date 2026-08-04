@@ -109,6 +109,7 @@ Exemplos:
 • *Assumo a Maria* / *Vou atender o João*
 • *Finalizei com a Maria* / *Atendi o 5511...*
 • *Libera o bot para o João* / *Bot pode voltar a falar com Maria*
+• *Marca a Maria como cliente ativo* / *Confirma venda da Maria*
 
 Se houver *duas Marias*, o bot pergunta qual delas (responda *1*, *2* ou o telefone).
 
@@ -209,6 +210,31 @@ def _execute_action(
             f"Contato {label} não encontrado.",
         )
 
+    if acao == "mark_active_client":
+        # `set_contact_status` takes a numeric contact id, not the
+        # `(external_id, canal)` identity `target` carries — mirrors how
+        # every other branch above resolves through `db` by identity rather
+        # than assuming `target` already has the row loaded (`WaitingContact`
+        # from disambiguation vs. `TargetIdentity` from a direct match both
+        # only guarantee `external_id`/`canal`/`label`).
+        contact = db.get_contact_by_phone(target.external_id, canal=target.canal)
+        if not contact:
+            return _reply(
+                router,
+                db,
+                admin_phone,
+                contact_id,
+                f"Contato {label} não encontrado.",
+            )
+        db.set_contact_status(contact.id, "cliente_ativo")
+        return _reply(
+            router,
+            db,
+            admin_phone,
+            contact_id,
+            f"✅ *{label}* marcado(a) como *cliente ativo*.",
+        )
+
     return _reply(router, db, admin_phone, contact_id, "Ação desconhecida.")
 
 
@@ -278,6 +304,55 @@ def _resolve_reactivate(
         return None, "\n".join(lines)
 
     return None, f"Não encontrei contato inativo com bot desligado para *{query.strip()}*."
+
+
+def _resolve_mark_active_client(
+    query: str, admin_phone: str, db: Database
+) -> tuple[TargetIdentity | None, str | None]:
+    """Same resolution/disambiguation shape as `_resolve_reactivate`, minus
+    the `ia_ativa` filter — marking a contact as `cliente_ativo`
+    (contact-interest-memory) makes sense for any contact, active bot or
+    not, unlike reactivating a silenced one."""
+    phone = extract_phone_from_text(query)
+    if phone:
+        return TargetIdentity(external_id=phone, canal=WHATSAPP, label=phone), None
+
+    rows = db.search_contacts_for_admin(query)
+    if len(rows) == 1:
+        r = rows[0]
+        return (
+            TargetIdentity(
+                external_id=r["external_id"] or r["phone"],
+                canal=r["canal"],
+                label=r["label"],
+            ),
+            None,
+        )
+    if len(rows) > 1:
+        candidatos = [
+            {
+                "id": r["id"],
+                "phone": r["phone"],
+                "push_name": r["push_name"],
+                "minutes_waiting": 0,
+                "prioridade": 0,
+                "canal": r["canal"],
+                "external_id": r["external_id"],
+                "handle": r["handle"],
+            }
+            for r in rows[:5]
+        ]
+        db.save_admin_sessao(admin_phone, "mark_active_client", candidatos)
+        lines = ["Encontrei vários contatos. Qual deles?"]
+        for idx, r in enumerate(rows[:5], start=1):
+            name = r["push_name"] or "Sem nome"
+            fila = " (na fila)" if r["in_queue"] else ""
+            canal = channel_label(r["canal"])
+            lines.append(f"*{idx}.* {name} — {r['label']} · {canal}{fila}")
+        lines.append("\nResponda com *1*, *2*... ou o telefone.")
+        return None, "\n".join(lines)
+
+    return None, f"Não encontrei contato para *{query.strip()}*."
 
 
 def handle_admin_message(
@@ -351,6 +426,14 @@ def handle_admin_message(
             return _reply(router, db, admin_phone, contact_id, err)
         return _execute_action(
             "reactivate", target, admin_phone, db, router, contact_id
+        )
+
+    if intent.action == "mark_active_client" and intent.query:
+        target, err = _resolve_mark_active_client(intent.query, admin_phone, db)
+        if err:
+            return _reply(router, db, admin_phone, contact_id, err)
+        return _execute_action(
+            "mark_active_client", target, admin_phone, db, router, contact_id
         )
 
     return _reply(

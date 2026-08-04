@@ -69,6 +69,52 @@ def update_session_state(
     return state
 
 
+# Business stages that a contact only ever reaches via manual admin action
+# (`whatbot/admin.py`), never automatically from a customer turn.
+_MANUAL_ONLY_STATUSES = {"cliente_ativo", "cancelado"}
+
+
+def next_status(
+    current_status: str,
+    session: SessionState,
+    intent: str,
+    has_order: bool = False,
+) -> str | None:
+    """Compute the contact's next business stage (`contatos.status`) from
+    this turn's already-resolved session/intent, or `None` when no
+    transition applies.
+
+    Rules (contact-interest-memory):
+    - `novo_lead` -> `interessado` once `session.item_interesse` is no
+      longer empty.
+    - -> `comprando` when `intent == INTENT_PEDIDO` (the customer states
+      purchase intent in text) or `has_order` is `True` (a real catalog
+      order arrived — `has_order` is always `False` today; it becomes
+      meaningful once `catalog-order-capture` adds an `order` key to the
+      inbound payload).
+    - Never regresses: once `comprando`, a neutral follow-up message keeps
+      the contact there.
+    - `cliente_ativo` and `cancelado` are never reached automatically here —
+      only through the admin's manual command (`whatbot/admin.py`) — and,
+      once in either, this function stops proposing further automatic
+      transitions.
+    """
+    # Deferred import: `intent_router` imports `SessionState` from this
+    # module, so importing `INTENT_PEDIDO` at module level would be circular.
+    from .intent_router import INTENT_PEDIDO
+
+    if current_status in _MANUAL_ONLY_STATUSES or current_status == "comprando":
+        return None
+
+    if intent == INTENT_PEDIDO or has_order:
+        return "comprando"
+
+    if current_status == "novo_lead" and session.item_interesse:
+        return "interessado"
+
+    return None
+
+
 def history_summary(history: List[HistoryMessage], max_turns: int = 4) -> str:
     """One-line summary of recent topics for LLM context."""
     facts = get_knowledge_facts()

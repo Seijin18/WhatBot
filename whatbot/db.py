@@ -29,6 +29,19 @@ def resolve_label(
     return name or handle or external_id or ""
 
 
+# Closed set of `contatos.status` values (contact-interest-memory). Validated
+# in Python by `Database.set_contact_status`/`create_contact`'s caller-supplied
+# default — no DB `CHECK` constraint, same style as other setters in this
+# module (see `update_contact_ia_active`).
+CONTACT_STATUSES = {
+    "novo_lead",
+    "interessado",
+    "comprando",
+    "cliente_ativo",
+    "cancelado",
+}
+
+
 @dataclass
 class Contact:
     id: int
@@ -374,6 +387,30 @@ class Database:
                     )
         except Exception as e:
             self._logger.exception("Erro atualizando ia_ativa: %s", e)
+            raise
+
+    def set_contact_status(self, contact_id: int, status: str) -> None:
+        """Update `contatos.status` (contact-interest-memory).
+
+        Validated against `CONTACT_STATUSES` in Python before touching the
+        DB — raises `ValueError` for anything outside the closed set, the
+        same style as other setters in this module (no DB `CHECK`
+        constraint).
+        """
+        if status not in CONTACT_STATUSES:
+            raise ValueError(
+                f"status inválido: {status!r} (esperado um de {sorted(CONTACT_STATUSES)})"
+            )
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE contatos SET status = %s WHERE id = %s",
+                        (status, contact_id),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro atualizando status: %s", e)
             raise
 
     def update_contact_last_inbound(

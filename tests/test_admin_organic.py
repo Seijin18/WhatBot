@@ -38,6 +38,16 @@ class TestAdminNlu(unittest.TestCase):
         intent = parse_admin_intent("libera o bot para Maria")
         self.assertEqual(intent.action, "reactivate")
 
+    def test_mark_active_client_intent_suffix_phrasing(self):
+        intent = parse_admin_intent("marca a Maria como cliente ativo")
+        self.assertEqual(intent.action, "mark_active_client")
+        self.assertIn("maria", intent.query.lower())
+
+    def test_mark_active_client_intent_prefix_phrasing(self):
+        intent = parse_admin_intent("confirma venda da Maria")
+        self.assertEqual(intent.action, "mark_active_client")
+        self.assertIn("maria", intent.query.lower())
+
     def test_simulate(self):
         phone, msg = parse_simulate_command("#simular 5511888888888 Olá")
         self.assertEqual(phone, "5511888888888")
@@ -222,6 +232,92 @@ class TestReactivateDisambiguationShowsChannel(unittest.TestCase):
 
         self.assertIn("WhatsApp", result["reply"])
         self.assertIn("Instagram", result["reply"])
+
+
+class TestMarkActiveClientCommand(unittest.TestCase):
+    """`contact-interest-memory`: manual admin command to mark a contact as
+    `cliente_ativo`, reusing `search_contacts_for_admin` + the same
+    disambiguation flow already covered by `TestReactivateDisambiguationShowsChannel`."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"ADMIN_NOTIFY_PHONES": "5511900000001"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_single_match_marks_the_contact_as_cliente_ativo(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        contact = db.create_contact(phone="5511888888888", push_name="Maria Silva")
+        self.assertEqual(contact.status, "novo_lead")
+
+        result = handle_admin_message(
+            "5511900000001",
+            "marca a Maria Silva como cliente ativo",
+            db,
+            router,
+            contact_id=1,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("cliente ativo", result["reply"].lower())
+        updated = db.get_contact_by_phone("5511888888888")
+        self.assertEqual(updated.status, "cliente_ativo")
+
+    def test_phone_query_marks_the_contact_directly(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Maria Silva")
+
+        result = handle_admin_message(
+            "5511900000001",
+            "confirma venda do 5511888888888",
+            db,
+            router,
+            contact_id=1,
+        )
+
+        self.assertTrue(result["ok"])
+        updated = db.get_contact_by_phone("5511888888888")
+        self.assertEqual(updated.status, "cliente_ativo")
+
+    def test_two_contacts_named_maria_trigger_disambiguation_then_resolve(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        first = db.create_contact(phone="5511888888888", push_name="Maria Silva")
+        second = db.create_contact(phone="5511777777777", push_name="Maria Costa")
+
+        disambiguation = handle_admin_message(
+            "5511900000001", "marca a Maria como cliente ativo", db, router, contact_id=1
+        )
+        self.assertTrue(disambiguation["ok"])
+        self.assertIn("Encontrei vários contatos", disambiguation["reply"])
+
+        picked = handle_admin_message(
+            "5511900000001", "1", db, router, contact_id=1
+        )
+
+        self.assertTrue(picked["ok"])
+        self.assertIn("cliente ativo", picked["reply"].lower())
+        # `search_contacts_for_admin` orders candidates most-recent-first, so
+        # option "1" is Maria Costa (created second, 5511777777777).
+        self.assertEqual(
+            db.get_contact_by_phone("5511777777777").status, "cliente_ativo"
+        )
+        # The other Maria is untouched.
+        self.assertEqual(
+            db.get_contact_by_phone("5511888888888").status, "novo_lead"
+        )
+
+    def test_contact_not_found_replies_without_crashing(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+
+        result = handle_admin_message(
+            "5511900000001", "marca a Fulana como cliente ativo", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("Não encontrei", result["reply"])
 
 
 if __name__ == "__main__":

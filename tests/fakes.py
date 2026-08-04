@@ -17,7 +17,14 @@ import re
 import unicodedata
 
 from whatbot.channels import WHATSAPP, normalize_channel
-from whatbot.db import ChannelCredential, Contact, MessageRecord, WaitingContact, resolve_label
+from whatbot.db import (
+    CONTACT_STATUSES,
+    ChannelCredential,
+    Contact,
+    MessageRecord,
+    WaitingContact,
+    resolve_label,
+)
 
 
 def _now() -> datetime:
@@ -282,6 +289,13 @@ class FakeDatabase:
 
     def update_contact_ia_active(self, contact_id: int, ia_ativa: bool) -> None:
         self.contacts[contact_id]["ia_ativa"] = ia_ativa
+
+    def set_contact_status(self, contact_id: int, status: str) -> None:
+        if status not in CONTACT_STATUSES:
+            raise ValueError(
+                f"status inválido: {status!r} (esperado um de {sorted(CONTACT_STATUSES)})"
+            )
+        self.contacts[contact_id]["status"] = status
 
     def update_contact_last_inbound(
         self, contact_id: int, when: datetime | None = None

@@ -11,6 +11,7 @@ IntentAction = Literal[
     "assume",
     "complete",
     "reactivate",
+    "mark_active_client",
     "summary",
     "help",
     "complete_all",
@@ -44,12 +45,43 @@ _SUMMARY = re.compile(r"\b(resumo|estat[ií]sticas|stats)\b", re.I)
 _HELP = re.compile(r"^(ajuda|help|\?)$", re.I)
 _COMPLETE_ALL = re.compile(r"\b(atender\s+todos|limpar\s+(?:a\s+)?fila)\b", re.I)
 
+# `contact-interest-memory`: manual confirmation that a contact became a
+# paying/active client (`contatos.status = "cliente_ativo"`) — the automatic
+# transitions (`whatbot/session_state.py::next_status`) deliberately never
+# reach this stage on their own. Two shapes, both name-bearing:
+#   - trigger word(s) BEFORE the name: "confirma venda da Maria",
+#     "virou cliente a Maria" -> `_strip_intent_prefix`.
+#   - trigger phrase AFTER the name: "marca a Maria como cliente ativo"
+#     -> `_strip_intent_suffix` (name is what's left before "cliente ativo").
+#
+# Each trigger has a "swallow the filler article" alternative tried first
+# (e.g. "marca a " / "venda da " / "cliente a ") so the leftover query is a
+# clean name — `search_contacts_for_admin` (unlike `find_waiting_matches`)
+# matches the query as a raw substring, not tokenized, so a stray leading
+# "a"/"da" would make an otherwise-matching `push_name` miss entirely.
+_MARK_ACTIVE_CLIENT_PREFIX = re.compile(
+    r"\bmarca(?:r)?\s+(?:a|o)\s+"
+    r"|\bmarque\s+(?:a|o)\s+"
+    r"|\bconfirma(?:r)?\s+(?:a\s+)?venda\s+(?:da|do|de)\s+"
+    r"|\bvirou\s+cliente\s+(?:a|o)\s+"
+    r"|\b(?:marca(?:r)?|marque|confirma(?:r)?\s+(?:a\s+)?venda|virou\s+cliente)\b",
+    re.I,
+)
+_MARK_ACTIVE_CLIENT_SUFFIX = re.compile(r"\b(?:como\s+)?cliente\s+ativo\b", re.I)
+
 
 def _strip_intent_prefix(text: str, pattern: re.Pattern[str]) -> str:
     match = pattern.search(text)
     if not match:
         return text.strip()
     return text[match.end() :].strip(" :,-–—")
+
+
+def _strip_intent_suffix(text: str, pattern: re.Pattern[str]) -> str:
+    match = pattern.search(text)
+    if not match:
+        return text.strip()
+    return text[: match.start()].strip(" :,-–—")
 
 
 def parse_admin_intent(text: str) -> AdminIntent:
@@ -68,6 +100,15 @@ def parse_admin_intent(text: str) -> AdminIntent:
     if _REACTIVATE.search(lower):
         query = _strip_intent_prefix(raw, _REACTIVATE)
         return AdminIntent("reactivate", query or raw)
+
+    if _MARK_ACTIVE_CLIENT_SUFFIX.search(lower):
+        query = _strip_intent_suffix(raw, _MARK_ACTIVE_CLIENT_SUFFIX)
+        query = _strip_intent_prefix(query, _MARK_ACTIVE_CLIENT_PREFIX)
+        return AdminIntent("mark_active_client", query or raw)
+
+    if _MARK_ACTIVE_CLIENT_PREFIX.search(lower):
+        query = _strip_intent_prefix(raw, _MARK_ACTIVE_CLIENT_PREFIX)
+        return AdminIntent("mark_active_client", query or raw)
 
     if _ASSUME.search(lower):
         query = _strip_intent_prefix(raw, _ASSUME)

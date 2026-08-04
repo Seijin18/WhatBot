@@ -20,6 +20,7 @@ from whatbot.channels.instagram import CAUSE_WINDOW_EXPIRED
 from whatbot.config import resolve_simulate_phone
 
 from fakes import FakeClient, FakeDatabase, FakeLlm
+from tests.kb_fixtures import load_class_schedule_kb
 
 ADMIN_PHONE = "5511900000001"
 CUSTOMER_PHONE = "5511999999999"
@@ -889,6 +890,50 @@ class TestInstagramClientRegistration(unittest.TestCase):
             post.return_value.json.return_value = {"message_id": "MSG1"}
             client.send_text(IGSID, "oi")
         post.assert_called_once()
+
+
+class TestContactStatusTransitions(MainE2ETestCase):
+    """`contact-interest-memory`: `whatbot.session_state.next_status` is
+    called right after `update_session_state` in
+    `process_customer_message` (`whatbot/main.py`), and — when it returns a
+    transition — persisted via `db.set_contact_status`. Needs a KB with a
+    registered `## Itens` section for `route_intent` to actually resolve
+    `item_interesse`: the real `knowledge/base.md` deployed today has no
+    `## Itens` section, so `load_class_schedule_kb()` (tests/kb_fixtures.py)
+    swaps in a KB that does, exactly like `tests/test_grounding.py` already
+    does for the same reason."""
+
+    def setUp(self):
+        super().setUp()
+        load_class_schedule_kb()
+
+    def test_first_item_interest_advances_novo_lead_to_interessado(self):
+        contact = self.db.create_contact(phone=CUSTOMER_PHONE, push_name="Maria")
+        self.assertEqual(contact.status, "novo_lead")
+
+        self.customer_sends("Quero saber sobre yoga")
+
+        # The state actually persisted in the fake DB, not just that the
+        # call didn't raise — `db.set_contact_status` must have run.
+        updated = self.db.get_contact_by_phone(CUSTOMER_PHONE)
+        self.assertEqual(updated.status, "interessado")
+
+    def test_admin_simulation_does_not_advance_the_real_contacts_status(self):
+        """Covers the `not simulated` guard added in `process_customer_message`
+        (whatbot/main.py) — a simulated customer turn must never persist a
+        stage change onto the real (or `sim_phone`-colliding) contact, the
+        same isolation every other `simulated` guard in that function
+        already gets (see `TestAdminSimulationDoesNotCorruptTheRealContact`
+        above)."""
+        contact = self.db.create_contact(phone=CUSTOMER_PHONE, push_name="Maria Real")
+        self.assertEqual(contact.status, "novo_lead")
+
+        main_mod.run_admin_simulation(
+            ADMIN_PHONE, CUSTOMER_PHONE, "Quero saber sobre yoga"
+        )
+
+        untouched = self.db.get_contact_by_phone(CUSTOMER_PHONE)
+        self.assertEqual(untouched.status, "novo_lead")
 
 
 if __name__ == "__main__":

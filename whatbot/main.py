@@ -44,7 +44,12 @@ from .fallback import build_knowledge_fallback, trim_history_for_chat
 from .grounding import ensure_grounded_reply
 from .intent_router import route_intent
 from .prompt_builder import build_enriched_system_prompt
-from .session_state import SessionState, history_summary, update_session_state
+from .session_state import (
+    SessionState,
+    history_summary,
+    next_status,
+    update_session_state,
+)
 from .webhook import parse_evolution_payload, parse_outgoing_staff_message
 from .admin import (
     SIMULATE_HISTORY_LIMIT,
@@ -462,6 +467,24 @@ def process_customer_message(
     )
     intent_result = route_intent(text, session, history)
     session = update_session_state(session, intent_result.intent, intent_result.items)
+
+    # `has_order` becomes `payload.get("order") is not None` once
+    # `catalog-order-capture` adds an `order` key to the inbound payload
+    # (that change is not implemented yet, so this is always `False` today —
+    # purchase intent is detected purely from `intent_result.intent`).
+    has_order = False
+    new_status = next_status(contact.status, session, intent_result.intent, has_order)
+    if new_status is not None and not simulated:
+        # Guarded by `not simulated`: an admin testing the bot via
+        # simulation must never advance the real (or sim_phone-colliding)
+        # contact's business stage — same reasoning as the
+        # `update_contact_session_state` guard below.
+        try:
+            _db.set_contact_status(contact.id, new_status)
+            contact.status = new_status
+        except Exception:
+            logger.exception("Falha ao atualizar status do contato")
+
     hist_summary = history_summary(history)
 
     system_prompt = build_enriched_system_prompt(
