@@ -26,10 +26,33 @@ Exemplos concretos deste projeto:
 qualquer coisa cujo conteúdo exato/bruto seja necessário para o próximo passo
 (ex.: ler um arquivo antes de editar — use `Read`, não o sandbox).
 
+## MCP Codebase Memory
+
+O MCP `codebase-memory` também está habilitado neste projeto (`.mcp.json`).
+Já foi indexado (`index_repository`) — mas a indexação **não é automática**:
+se uma sessão notar que o índice está bem atrás do `HEAD` atual (`index_status`
+vs `git log`), rode `index_repository` de novo antes de confiar nas respostas.
+
+Use-o para perguntas estruturais deste repo em vez de grep manual/agente de
+exploração, por exemplo:
+- "o que chama `ChannelRouter.send`", "quem usa `send_admin`/`send_to_contact`"
+  — `query_graph`/`trace_path`, já que `whatbot/channels/` é a única fronteira
+  de saída e vale confirmar que nenhum módulo de domínio está furando essa
+  camada.
+- "quais rotas/handlers de webhook existem hoje" (Evolution API, Windmill
+  entrypoints) — `get_architecture` antes de mexer em `windmill/f/whatbot/`.
+- Localizar onde a chave de identidade (`contatos.phone` hoje, migrando para
+  `(canal, external_id)` na capability `identity`) é usada — `search_code`/
+  `search_graph` em vez de grep espalhado por `whatbot/`.
+
+Para busca textual simples (uma string exata, um TODO específico), `grep`/
+`Explore` continua sendo mais direto — o grafo é para relações, não substitui
+busca literal.
+
 ## OpenSpec
 
 Este projeto usa OpenSpec (`openspec/`) como fonte de verdade do planejamento.
 Ver `openspec/project.md` para convenções específicas do repositório (testes,
 camadas, chave de identidade) e a ordem de dependência entre os changes ativos.
 As regras gerais de fluxo OpenSpec (propor → aplicar → sincronizar → arquivar)
-já estão nas instruções pessoais globais do usuário.
+estão nas instruções globais do usuário (`~/.claude/CLAUDE.md`).
