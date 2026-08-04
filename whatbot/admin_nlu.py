@@ -100,7 +100,13 @@ def is_casual_test_message(text: str) -> bool:
 
 
 def parse_simulate_command(text: str) -> tuple[str | None, str] | None:
-    """Parse `#simular [phone] message` from admin test messages."""
+    """Parse `#simular [phone] message` (one-shot) from admin test messages.
+
+    A bare `#simular` (no phone, no message) is NOT a one-shot command — it
+    toggles the persistent simulation mode instead (see
+    `is_simulate_start_command`), so this returns `None` for it and lets the
+    caller check that separately.
+    """
     raw = text.strip()
     if not raw.lower().startswith("#simular"):
         return None
@@ -111,3 +117,22 @@ def parse_simulate_command(text: str) -> tuple[str | None, str] | None:
     if phone_match:
         return phone_match.group(1), phone_match.group(2).strip()
     return None, body
+
+
+_SIMULATE_START = re.compile(r"^#simular$", re.I)
+_SIMULATE_END = re.compile(r"^#end-simular$", re.I)
+
+
+def is_simulate_start_command(text: str) -> bool:
+    """`#simular` alone in the message — turns on persistent simulation
+    mode, where every following admin message is treated as the simulated
+    customer speaking, until `#end-simular`. Distinct from
+    `parse_simulate_command`'s one-shot `#simular <phone> <mensagem>` (which
+    has content after the command and never matches this)."""
+    return bool(_SIMULATE_START.match(text.strip()))
+
+
+def is_simulate_end_command(text: str) -> bool:
+    """`#end-simular` alone in the message — turns persistent simulation
+    mode back off."""
+    return bool(_SIMULATE_END.match(text.strip()))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import logging
+from datetime import datetime, timezone
 from typing import Dict, Any
 
 from .config import (
@@ -30,7 +31,7 @@ from .channels import (
     validate_channel,
 )
 from .channels.instagram import InstagramClient, instagram_last_inbound_lookup
-from .db import Database
+from .db import Database, MessageRecord
 from .instagram_health import record_send_result
 from .llm import LlmUnavailableError, create_llm_client
 from .domain import (
@@ -45,10 +46,19 @@ from .intent_router import route_intent
 from .prompt_builder import build_enriched_system_prompt
 from .session_state import SessionState, history_summary, update_session_state
 from .webhook import parse_evolution_payload, parse_outgoing_staff_message
-from .admin import handle_admin_message
+from .admin import (
+    SIMULATE_HISTORY_LIMIT,
+    end_admin_simulation,
+    get_active_admin_simulation,
+    handle_admin_message,
+    save_active_admin_simulation,
+    start_admin_simulation,
+)
 from .admin_nlu import (
     DEFAULT_CASUAL_TEST_MESSAGE,
     is_casual_test_message,
+    is_simulate_end_command,
+    is_simulate_start_command,
     parse_simulate_command,
 )
 from .queue import (
@@ -187,6 +197,8 @@ def run_admin_simulation(
     sim_text: str,
     push_name: str | None = None,
     canal: str | None = None,
+    history_override: list | None = None,
+    session_override: SessionState | None = None,
 ) -> Dict[str, Any]:
     admin_phone = normalize_phone(admin_phone)
     canal = normalize_channel(canal)
@@ -203,6 +215,8 @@ def run_admin_simulation(
         push_name=f"Simulado por {push_name or admin_phone}",
         simulated=True,
         canal=canal,
+        history_override=history_override,
+        session_override=session_override,
     )
     reply = result.get("model_reply") or result.get("message") or str(result)
     if result.get("handed_to_human"):
@@ -222,6 +236,76 @@ def run_admin_simulation(
     return result
 
 
+def _deserialize_simulation_history(raw: list[dict]) -> list[MessageRecord]:
+    """Rebuild fake `MessageRecord`s from the JSONB-stored simulation turn
+    list. Only `.direction`/`.text` are ever read downstream (LLM prompt
+    building, `trim_history_for_chat`) — `id`/`contact_id`/`created_at` are
+    placeholders, never persisted anywhere."""
+    now = datetime.now(timezone.utc)
+    return [
+        MessageRecord(
+            id=0,
+            contact_id=0,
+            direction=item["direction"],
+            text=item["text"],
+            created_at=now,
+        )
+        for item in raw
+    ]
+
+
+def _continue_admin_simulation(
+    admin_phone: str,
+    push_name: str | None,
+    canal: str | None,
+    text: str,
+    state: dict,
+) -> Dict[str, Any]:
+    """One turn inside an active persistent admin simulation session
+    (`#simular` alone / `#end-simular` alone — see `whatbot.admin`). Carries
+    the simulated conversation's history/session across turns via `state`
+    (persisted in `admin_sessao` by the caller), without the underlying
+    `process_customer_message(simulated=True)` call ever touching the real
+    `sim_phone` contact's actual message history or session_state.
+    """
+    sim_phone = state["sim_phone"]
+    history_override = _deserialize_simulation_history(state.get("history") or [])
+    session_override = SessionState.from_dict(state.get("session_state") or {})
+
+    result = run_admin_simulation(
+        admin_phone,
+        sim_phone,
+        text,
+        push_name=push_name,
+        canal=canal,
+        history_override=history_override,
+        session_override=session_override,
+    )
+
+    # `session_state` is only present on turns that actually reached a
+    # normal (or model-decided-handover) reply — on an error/early-exit
+    # return, fall back to the previous state so memory simply doesn't
+    # advance instead of being wiped.
+    new_session_state = result.get("session_state") or state.get("session_state") or {}
+    reply_text = result.get("model_reply") or result.get("message") or ""
+    new_history = (
+        [{"direction": "out", "text": reply_text}, {"direction": "in", "text": text}]
+        + (state.get("history") or [])
+    )[:SIMULATE_HISTORY_LIMIT]
+
+    save_active_admin_simulation(
+        _db,
+        admin_phone,
+        {
+            "sim_phone": sim_phone,
+            "canal": canal,
+            "history": new_history,
+            "session_state": new_session_state,
+        },
+    )
+    return result
+
+
 def check_queue(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Scheduled Windmill job: queue maintenance and daily summary."""
     try:
@@ -238,8 +322,19 @@ def process_customer_message(
     push_name: str | None = None,
     simulated: bool = False,
     canal: str | None = None,
+    history_override: list | None = None,
+    session_override: SessionState | None = None,
 ) -> Dict[str, Any]:
-    """Handle an inbound customer message (or admin simulation)."""
+    """Handle an inbound customer message (or admin simulation).
+
+    `history_override`/`session_override` let a caller supply the recent
+    conversation/session state directly instead of loading it from the real
+    contact's DB row — used by the persistent admin simulation mode
+    (`whatbot.admin`) to carry a simulated conversation's memory across
+    turns without ever touching the real `sim_phone` contact's actual
+    history (which stays untouched, exactly like every other `simulated`
+    guard in this function).
+    """
     canal = normalize_channel(canal)
     queue_check: Dict[str, Any] = {}
     try:
@@ -349,15 +444,22 @@ def process_customer_message(
             logger.exception("Erro durante handover: %s", e)
             return {"ok": False, "error": "handover_failed", "detail": str(e)}
 
-    try:
-        history = trim_history_for_chat(
-            _db.get_recent_messages(contact.id, limit=6), text
-        )
-    except Exception:
-        logger.exception("Falha ao carregar histórico; prosseguindo sem histórico")
-        history = []
+    if history_override is not None:
+        history = trim_history_for_chat(history_override, text)
+    else:
+        try:
+            history = trim_history_for_chat(
+                _db.get_recent_messages(contact.id, limit=6), text
+            )
+        except Exception:
+            logger.exception("Falha ao carregar histórico; prosseguindo sem histórico")
+            history = []
 
-    session = SessionState.from_dict(contact.session_state or {})
+    session = (
+        session_override
+        if session_override is not None
+        else SessionState.from_dict(contact.session_state or {})
+    )
     intent_result = route_intent(text, session, history)
     session = update_session_state(session, text, intent_result.intent, history)
     hist_summary = history_summary(history)
@@ -510,6 +612,7 @@ def process_customer_message(
             )
             result["queue_check"] = queue_check
             result["simulated"] = simulated
+            result["session_state"] = session.to_dict()
             return result
         except Exception as e:
             logger.exception("Erro durante handover: %s", e)
@@ -583,6 +686,7 @@ def process_customer_message(
         "simulated": simulated,
         "intent": intent_result.intent,
         "response_mode": response_mode,
+        "session_state": session.to_dict(),
     }
 
 
@@ -725,13 +829,49 @@ def _dispatch_payload(
         return {"ok": False, "error": "invalid_payload"}
 
     if canal == WHATSAPP and is_admin_phone(phone):
+        admin_phone_norm = normalize_phone(phone)
         log_inbound(
-            normalize_phone(phone),
+            admin_phone_norm,
             text,
             canal=canal,
             push_name=push_name,
             source="admin",
         )
+
+        active_sim = get_active_admin_simulation(_db, admin_phone_norm)
+        if active_sim is not None:
+            if is_simulate_end_command(text):
+                end_admin_simulation(_db, admin_phone_norm)
+                try:
+                    _router.send_admin_text(
+                        phone, "🧪 Simulação encerrada.", source="simulation"
+                    )
+                except Exception:
+                    logger.exception("Falha ao confirmar fim da simulação")
+                return {"ok": True, "admin_command": True, "simulation_ended": True}
+            return _continue_admin_simulation(
+                phone, push_name, canal, text, active_sim
+            )
+
+        if is_simulate_start_command(text):
+            sim_phone = start_admin_simulation(_db, admin_phone_norm, canal)
+            try:
+                _router.send_admin_text(
+                    phone,
+                    f"🧪 Simulação ativada — testando como cliente ({sim_phone}). "
+                    "Envie mensagens como se fosse o cliente. Digite #end-simular "
+                    "para sair.",
+                    source="simulation",
+                )
+            except Exception:
+                logger.exception("Falha ao confirmar início da simulação")
+            return {
+                "ok": True,
+                "admin_command": True,
+                "simulation_started": True,
+                "simulated_as": sim_phone,
+            }
+
         sim = _resolve_admin_simulate(text)
         if sim:
             sim_phone, sim_text = sim

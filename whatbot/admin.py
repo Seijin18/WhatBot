@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 
 from .admin_nlu import parse_admin_intent
-from .config import AUTO_REACTIVATE_HOURS, get_association_phone
+from .config import AUTO_REACTIVATE_HOURS, get_business_phone, resolve_simulate_phone
 from .contact_resolver import (
     extract_phone_from_text,
     find_waiting_matches,
@@ -39,18 +39,67 @@ class TargetIdentity:
     canal: str
     label: str
 
+
+# Persistent admin simulation mode (`#simular` alone / `#end-simular` alone
+# — whatbot/admin_nlu.py). Reuses the `admin_sessao` table (same one the
+# disambiguation flow below uses) instead of a new schema: it's already a
+# per-admin_phone slot with a sliding 10-minute TTL (each save refreshes
+# `created_at`, so an active simulation never expires while the admin keeps
+# testing, and auto-clears itself if they forget to `#end-simular`). The
+# `candidatos` JSONB column holds a single-element list with the simulated
+# phone, the accumulated (capped) turn history, and the session state — so
+# `whatbot.main._continue_admin_simulation` can carry conversational memory
+# across turns without ever touching the real contact's message history
+# (same isolation `simulated=True` already guarantees elsewhere).
+_SIMULATE_ACAO = "simulacao_ativa"
+SIMULATE_HISTORY_LIMIT = 6
+
+
+def start_admin_simulation(db: Database, admin_phone: str, canal: str) -> str:
+    """Turn on persistent simulation mode; returns the simulated phone in use."""
+    sim_phone = resolve_simulate_phone(None)
+    db.save_admin_sessao(
+        admin_phone,
+        _SIMULATE_ACAO,
+        [{"sim_phone": sim_phone, "canal": canal, "history": [], "session_state": {}}],
+    )
+    return sim_phone
+
+
+def get_active_admin_simulation(db: Database, admin_phone: str) -> dict | None:
+    """Active simulation state for `admin_phone`, or `None` if there isn't
+    one (never started, already ended, or expired)."""
+    sessao = db.get_admin_sessao(admin_phone)
+    if not sessao:
+        return None
+    acao, candidatos = sessao
+    if acao != _SIMULATE_ACAO or not candidatos:
+        return None
+    return candidatos[0]
+
+
+def save_active_admin_simulation(db: Database, admin_phone: str, state: dict) -> None:
+    """Persist updated simulation state (new turn appended, refreshed
+    session_state) — also refreshes the sliding TTL."""
+    db.save_admin_sessao(admin_phone, _SIMULATE_ACAO, [state])
+
+
+def end_admin_simulation(db: Database, admin_phone: str) -> None:
+    db.clear_admin_sessao(admin_phone)
+
+
 def _build_help_text() -> str:
     # The business's own WhatsApp Business line is read from
-    # `ASSOCIATION_PHONE` (`config.get_association_phone()`) rather than
+    # `BUSINESS_PHONE` (`config.get_business_phone()`) rather than
     # hardcoded: a literal number here would silently point at a *different*
     # business's line once this bot is redeployed for a new KB
     # (docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.8).
-    assoc_phone = get_association_phone()
+    business_phone = get_business_phone()
     warning = (
-        f"\n⚠️ O número *{assoc_phone}* é a linha do WhatsApp Business. "
+        f"\n⚠️ O número *{business_phone}* é a linha do WhatsApp Business. "
         "Mensagens *de* esse app saem como *fromMe* e não simulam cliente. "
         "Teste pelo celular pessoal admin ou `#simular`.\n"
-        if assoc_phone
+        if business_phone
         else ""
     )
     return f"""*Atendimento — fale naturalmente*

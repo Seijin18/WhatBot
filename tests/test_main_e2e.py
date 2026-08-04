@@ -17,6 +17,7 @@ from unittest.mock import patch
 from whatbot import main as main_mod
 from whatbot.channels import INSTAGRAM, WHATSAPP, ChannelError, ChannelRouter
 from whatbot.channels.instagram import CAUSE_WINDOW_EXPIRED
+from whatbot.config import resolve_simulate_phone
 
 from fakes import FakeClient, FakeDatabase, FakeLlm
 
@@ -561,6 +562,121 @@ class TestAdminSimulationDoesNotCorruptTheRealContact(MainE2ETestCase):
         self.assertTrue(contact.ia_ativa)
         self.assertIsNone(contact.handover_at)
         self.assertEqual(self.db.get_recent_messages(contact.id), [])
+
+
+class TestPersistentAdminSimulation(MainE2ETestCase):
+    """`#simular` alone / `#end-simular` alone — persistent simulation mode
+    (whatbot/admin.py's `admin_sessao`-backed session, whatbot/main.py's
+    `_continue_admin_simulation`). Distinct from the one-shot
+    `#simular <telefone> <mensagem>` covered by `TestAdminSimulation` above,
+    which must keep working unchanged."""
+
+    def _sim_phone(self) -> str:
+        return resolve_simulate_phone(None)
+
+    def test_bare_simular_starts_persistent_mode(self):
+        result = main_mod.main(
+            evolution_payload(ADMIN_PHONE, "#simular", push_name="Secretaria")
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result.get("simulation_started"))
+        sessao = self.db.get_admin_sessao(ADMIN_PHONE)
+        self.assertIsNotNone(sessao)
+        acao, candidatos = sessao
+        self.assertEqual(acao, "simulacao_ativa")
+        self.assertEqual(candidatos[0]["sim_phone"], result["simulated_as"])
+        confirmations = [m for m in self.wa.sent if m["to"] == ADMIN_PHONE]
+        self.assertTrue(confirmations)
+        self.assertIn("Simulação ativada", confirmations[-1]["text"])
+
+    def test_free_message_while_active_is_treated_as_simulated_customer(self):
+        main_mod.main(evolution_payload(ADMIN_PHONE, "#simular", push_name="Secretaria"))
+
+        result = main_mod.main(
+            evolution_payload(
+                ADMIN_PHONE, "Quais modalidades vocês têm?", push_name="Secretaria"
+            )
+        )
+
+        self.assertTrue(result["ok"])
+        transcript = [
+            m
+            for m in self.wa.sent
+            if m["to"] == ADMIN_PHONE and m["source"] == "simulation"
+        ]
+        self.assertTrue(transcript)
+        self.assertIn("Teste como cliente", transcript[-1]["text"])
+        # The simulated customer is never actually messaged.
+        self.assert_nothing_sent_on(self.ig)
+
+    def test_memory_carries_across_turns(self):
+        """The whole point of the persistent mode over the one-shot command:
+        the bot must see the earlier simulated turn as conversation history,
+        not start fresh every message."""
+        main_mod.main(evolution_payload(ADMIN_PHONE, "#simular", push_name="Secretaria"))
+        main_mod.main(
+            evolution_payload(ADMIN_PHONE, "primeira mensagem", push_name="Secretaria")
+        )
+
+        self.llm.calls.clear()
+        main_mod.main(
+            evolution_payload(ADMIN_PHONE, "segunda mensagem", push_name="Secretaria")
+        )
+
+        self.assertEqual(len(self.llm.calls), 1)
+        history_texts = [m.text for m in self.llm.calls[0]["recent_history"]]
+        self.assertIn("primeira mensagem", history_texts)
+
+    def test_end_simular_deactivates_and_confirms(self):
+        main_mod.main(evolution_payload(ADMIN_PHONE, "#simular", push_name="Secretaria"))
+
+        result = main_mod.main(
+            evolution_payload(ADMIN_PHONE, "#end-simular", push_name="Secretaria")
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result.get("simulation_ended"))
+        self.assertIsNone(self.db.get_admin_sessao(ADMIN_PHONE))
+        confirmations = [m for m in self.wa.sent if m["to"] == ADMIN_PHONE]
+        self.assertIn("Simulação encerrada", confirmations[-1]["text"])
+
+    def test_real_admin_command_after_ending_is_not_simulated(self):
+        contact = self.db.create_contact(phone=CUSTOMER_PHONE, push_name="Maria")
+        self.db.enroll_handover(contact.id, motivo="pedido_do_cliente")
+        main_mod.main(evolution_payload(ADMIN_PHONE, "#simular", push_name="Secretaria"))
+        main_mod.main(evolution_payload(ADMIN_PHONE, "#end-simular", push_name="Secretaria"))
+
+        result = main_mod.main(
+            evolution_payload(ADMIN_PHONE, "quem está na fila?", push_name="Secretaria")
+        )
+
+        self.assertTrue(result["admin_command"])
+        self.assertIn("Maria", result["reply"])
+
+    def test_old_one_shot_simular_still_works_without_entering_persistent_mode(self):
+        result = main_mod.main(
+            evolution_payload(
+                ADMIN_PHONE, f"#simular {CUSTOMER_PHONE} oi", push_name="Secretaria"
+            )
+        )
+
+        self.assertEqual(result.get("simulated_as"), CUSTOMER_PHONE)
+        self.assertIsNone(self.db.get_admin_sessao(ADMIN_PHONE))
+
+    def test_persistent_simulation_does_not_touch_the_real_contact(self):
+        sim_phone = self._sim_phone()
+        self.db.create_contact(phone=sim_phone, push_name="Cliente Real")
+        main_mod.main(evolution_payload(ADMIN_PHONE, "#simular", push_name="Secretaria"))
+
+        main_mod.main(
+            evolution_payload(ADMIN_PHONE, "Quais modalidades?", push_name="Secretaria")
+        )
+
+        contact = self.db.get_contact_by_phone(sim_phone)
+        self.assertEqual(contact.push_name, "Cliente Real")
+        self.assertEqual(self.db.get_recent_messages(contact.id), [])
+        self.assertEqual(contact.session_state, {})
 
 
 class TestWebhookIdempotency(MainE2ETestCase):
