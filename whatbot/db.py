@@ -77,6 +77,14 @@ class WaitingContact:
     external_id: str | None = None
     handle: str | None = None
     last_inbound_at: datetime | None = None
+    # Aditive fields (handover-summary-for-agent): `contatos.status` and
+    # `contatos.session_state`, needed to build the handover summary
+    # (`whatbot/queue.py::build_contact_summary`). `None` for callers that
+    # reconstruct a `WaitingContact` without this data (e.g.
+    # `contact_resolver.py`'s admin-session replay) — the summary degrades
+    # gracefully in that case.
+    status: str | None = None
+    session_state: dict[str, Any] | None = None
 
     @property
     def label(self) -> str:
@@ -251,18 +259,22 @@ class Database:
             self._logger.exception("Erro criando schema: %s", e)
             raise
 
-    def _row_to_contact(self, row) -> Contact:
-        session_raw = row[9] if len(row) > 9 else None
-        session_state: dict[str, Any] | None
+    @staticmethod
+    def _parse_session_state(session_raw: Any) -> dict[str, Any]:
+        """Normalize a `session_state` JSONB column value (already a `dict`
+        via psycopg's JSONB adapter, a raw JSON string, or `None`/falsy) into
+        a plain `dict`. Shared by `_row_to_contact` and `_row_to_waiting`."""
         if isinstance(session_raw, dict):
-            session_state = session_raw
-        elif session_raw:
+            return session_raw
+        if session_raw:
             try:
-                session_state = json.loads(session_raw)
+                return json.loads(session_raw)
             except (TypeError, json.JSONDecodeError):
-                session_state = {}
-        else:
-            session_state = {}
+                return {}
+        return {}
+
+    def _row_to_contact(self, row) -> Contact:
+        session_state = self._parse_session_state(row[9] if len(row) > 9 else None)
         return Contact(
             id=row[0],
             phone=row[1],
@@ -522,7 +534,8 @@ class Database:
         return """
             SELECT id, phone, push_name, handover_at, handover_motivo,
                    EXTRACT(EPOCH FROM (now() - handover_at)) / 60 AS minutes_waiting,
-                   prioridade, assumido_por, canal, external_id, handle, last_inbound_at
+                   prioridade, assumido_por, canal, external_id, handle, last_inbound_at,
+                   status, session_state
             FROM contatos
             WHERE handover_at IS NOT NULL AND atendido_at IS NULL
         """
@@ -541,6 +554,12 @@ class Database:
             external_id=r[9] if len(r) > 9 else None,
             handle=r[10] if len(r) > 10 else None,
             last_inbound_at=r[11] if len(r) > 11 else None,
+            # handover-summary-for-agent: appended at the end of `_waiting_select()`
+            # so any raw-SQL caller that still expects the original 12-column
+            # shape (`AND canal = ... AND external_id = ...` filters appended
+            # by `get_contact_waiting`/`get_long_wait_unnotified`) keeps working.
+            status=r[12] if len(r) > 12 else None,
+            session_state=self._parse_session_state(r[13]) if len(r) > 13 else None,
         )
 
     def get_waiting_contacts(self) -> List[WaitingContact]:
@@ -904,21 +923,6 @@ class Database:
         except Exception as e:
             self._logger.exception("Erro carregando histórico: %s", e)
             raise
-
-    def get_last_inbound_message(self, contact_id: int) -> str | None:
-        self.init_pool()
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT text FROM mensagens
-                    WHERE contact_id = %s AND direction = 'in'
-                    ORDER BY created_at DESC LIMIT 1
-                    """,
-                    (contact_id,),
-                )
-                row = cur.fetchone()
-                return row[0] if row else None
 
     def process_auto_reactivations(self) -> list[str]:
         """Re-enable bot for contacts past scheduled resume time.

@@ -132,7 +132,9 @@ def executar_handover_para_secretaria(
             )
         try:
             waiting = db.get_contact_waiting(phone, canal=canal)
-            notify_result = process_new_handover(db, router, contact=waiting)
+            notify_result = process_new_handover(
+                db, router, contact=waiting, last_order=order
+            )
             long_wait_result = check_long_wait_notifications(db, router)
         except Exception:
             logger.exception(

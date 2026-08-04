@@ -220,6 +220,10 @@ class FakeDatabase:
             external_id=row["external_id"],
             handle=row["handle"],
             last_inbound_at=row.get("last_inbound_at"),
+            # handover-summary-for-agent: mirrors the `status`/`session_state`
+            # columns `Database._row_to_waiting` now selects.
+            status=row.get("status"),
+            session_state=dict(row.get("session_state") or {}),
         )
 
     def _is_waiting_row(self, row: dict) -> bool:
@@ -556,14 +560,6 @@ class FakeDatabase:
             )
             for m in rows[:limit]
         ]
-
-    def get_last_inbound_message(self, contact_id: int) -> str | None:
-        rows = [
-            m
-            for m in self.messages
-            if m["contact_id"] == contact_id and m["direction"] == "in"
-        ]
-        return rows[-1]["text"] if rows else None
 
     # -- admin sessions --------------------------------------------------
 

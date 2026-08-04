@@ -331,6 +331,40 @@ class TestCatalogOrderCapture(MainE2ETestCase):
         updated = self.db.get_contact_by_phone(CUSTOMER_PHONE)
         self.assertEqual(updated.status, "comprando")
 
+    def test_android_order_admin_notification_lists_resolved_items(self):
+        """handover-summary-for-agent: the immediate admin notification for
+        an identifiable catalog order resolves productId -> nome/preço via
+        `catalog-product-sync` end to end (webhook -> domain -> queue)."""
+        self.db.upsert_catalog_products(
+            [
+                {"product_id": "PROD-1", "nome": "Camiseta", "preco": 49.9, "disponivel": True},
+                {"product_id": "PROD-2", "nome": "Boné", "preco": 29.9, "disponivel": True},
+            ]
+        )
+
+        main_mod.main(
+            evolution_order_payload(CUSTOMER_PHONE, self._android_order_message())
+        )
+
+        admin_msgs = [m["text"] for m in self.wa.sent if m["to"] == ADMIN_PHONE]
+        self.assertTrue(admin_msgs)
+        self.assertIn("Camiseta", admin_msgs[0])
+        # `_android_order_message()` orders 3 units of PROD-2 — the quantity
+        # must reach the admin notification, not just the resolved name.
+        self.assertIn("Boné x3", admin_msgs[0])
+
+    def test_ios_order_admin_notification_warns_unidentified_items(self):
+        """handover-summary-for-agent: an unidentifiable (iOS) order warns
+        the attendant explicitly, end to end."""
+        main_mod.main(
+            evolution_order_payload(CUSTOMER_PHONE, self._ios_order_message())
+        )
+
+        admin_msgs = [m["text"] for m in self.wa.sent if m["to"] == ADMIN_PHONE]
+        self.assertTrue(admin_msgs)
+        self.assertIn("itens não identificados", admin_msgs[0])
+        self.assertIn("confirmar com o cliente", admin_msgs[0])
+
 
 class TestAdminCommands(MainE2ETestCase):
     def test_admin_assume_replies_on_admin_channel(self):

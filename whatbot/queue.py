@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, datetime, timezone
-from typing import List
+from typing import Any, List
 from zoneinfo import ZoneInfo
 
 from .config import (
@@ -19,9 +19,10 @@ from .config import (
     NOTIFY_QUEUE_BATCH,
 )
 from .channels import channel_label, messaging_window, send_admin
-from .db import Database, WaitingContact, resolve_label
+from .db import Database, MessageRecord, WaitingContact, resolve_label
 from .instagram_health import run_instagram_health_checks
 from .priority import prioridade_label
+from .session_state import SessionState, history_summary
 
 logger = logging.getLogger("whatbot.queue")
 
@@ -44,6 +45,171 @@ def format_admin_phone_label(phone: str | None) -> str:
     if phone == "whatsapp_business":
         return "WhatsApp Business"
     return phone
+
+
+# Portuguese labels for `contatos.status` (contact-interest-memory) — none of
+# the existing helpers (`prioridade_label`, `channel_label`) cover the
+# business stage, and `build_contact_summary` is the first place that needs
+# to render it to a human.
+_STATUS_LABELS: dict[str, str] = {
+    "novo_lead": "novo lead",
+    "interessado": "interessado",
+    "comprando": "comprando",
+    "cliente_ativo": "cliente ativo",
+    "cancelado": "cancelado",
+}
+
+
+def _format_price(preco: Any) -> str:
+    """pt-BR currency formatting (`49,90`, not the raw `49.9`) — user-facing
+    text stays in Portuguese (`openspec/project.md`)."""
+    return f"{float(preco):.2f}".replace(".", ",")
+
+
+def _format_resolved_order_item(item: dict) -> str:
+    nome = item.get("nome") or item.get("product_id") or "item"
+    quantity = item.get("quantity")
+    preco = item.get("preco")
+    # `quantity` is the count already captured by `catalog-order-capture`
+    # (`order["items"][i]["quantity"]`, merged in by `_resolve_order_for_summary`)
+    # — a 3-unit order must not read the same as a 1-unit order (critic
+    # finding: "já sabe o que entregar/cobrar" in the proposal's "Why").
+    label = f"{nome} x{quantity}" if quantity and quantity != 1 else nome
+    if preco is None:
+        return label
+    price = _format_price(preco)
+    suffix = " cada" if quantity and quantity != 1 else ""
+    return f"{label} (R$ {price}{suffix})"
+
+
+def _format_order_summary(order: dict) -> str:
+    """Portuguese line summarizing a catalog order for the admin notification.
+
+    `order` is expected already enriched by the caller with a
+    `resolved_items` key (via `Database.resolve_catalog_items`, see
+    `_resolve_order_for_summary`) when `items_identifiable` and the catalog
+    cache had a match — keeps `build_contact_summary` itself free of a
+    `Database` dependency (design.md, Decisão 2).
+    """
+    if not order.get("items_identifiable"):
+        return (
+            "Pedido do catálogo — itens não identificados, confirmar com o "
+            "cliente."
+        )
+    resolved = order.get("resolved_items") or []
+    if not resolved:
+        # catalog-product-sync unavailable, or the cache had no match for any
+        # of these productIds — degrade entirely to the raw data
+        # `catalog-order-capture` already captured (design.md, Decisão 2).
+        title = order.get("order_title") or "Pedido do catálogo"
+        count = order.get("item_count")
+        return f"Pedido: {title} ({count} item(ns))" if count else f"Pedido: {title}"
+
+    items_str = "; ".join(_format_resolved_order_item(r) for r in resolved)
+    # Partial cache hit for THIS order (design.md, Decisão 2: "cache vazio
+    # para um productId específico" — the degradation is per-item, not
+    # all-or-nothing): list what IS known and flag what's missing, rather
+    # than silently showing a shorter order than the customer actually sent.
+    requested_ids = {
+        item.get("productId")
+        for item in order.get("items") or []
+        if item.get("productId")
+    }
+    resolved_ids = {item.get("product_id") for item in resolved}
+    missing = len(requested_ids - resolved_ids)
+    if missing:
+        items_str += f"; + {missing} item(ns) não identificado(s)"
+    return f"Pedido: {items_str}"
+
+
+def build_contact_summary(
+    contact: WaitingContact,
+    session_state: SessionState | dict | None,
+    last_order: dict | None = None,
+    history: List[MessageRecord] | None = None,
+) -> str:
+    """Short, deterministic Portuguese summary of a contact's business stage,
+    interest and (when this handover was triggered by one) catalog order —
+    for the admin handover notification (handover-summary-for-agent).
+
+    No LLM call (design.md, Decisão 1) — reuses `history_summary()` for the
+    recent-topics line and adds the business-stage/interest/order signals
+    already available on `contact`/`session_state`. Returns `""` when there
+    is nothing to show (Requirement "Contato sem nenhum sinal de interesse",
+    Scenario "Contato sem nenhum sinal de interesse") — callers must skip the
+    section entirely in that case rather than render an empty header.
+    """
+    session = (
+        session_state
+        if isinstance(session_state, SessionState)
+        else SessionState.from_dict(session_state)
+    )
+
+    lines: List[str] = []
+
+    status = getattr(contact, "status", None)
+    if status:
+        lines.append(f"Estágio: {_STATUS_LABELS.get(status, status)}")
+
+    if session.item_interesse:
+        lines.append(f"Interesse: {', '.join(session.item_interesse)}")
+
+    if history:
+        topics = history_summary(history)
+        if topics:
+            lines.append(topics)
+
+    if last_order is not None:
+        lines.append(_format_order_summary(last_order))
+
+    return "\n".join(lines)
+
+
+def _resolve_order_for_summary(db: Database, order: dict | None) -> dict | None:
+    """Enrich a catalog order dict with `resolved_items` (name/price via
+    `Database.resolve_catalog_items`, `quantity` merged back in from the
+    order's own `items`) before handing it to `build_contact_summary` — keeps
+    that function free of a `Database` dependency (design.md, Decisão 2).
+    Best-effort: a resolution failure falls back to the order's raw data,
+    never blocks the notification."""
+    if order is None:
+        return None
+    resolved_items: List[dict] = []
+    if order.get("items_identifiable"):
+        # `Database.resolve_catalog_items` only returns product_id/nome/
+        # preco/disponivel — `quantity` lives on the order's own `items`
+        # (captured by `catalog-order-capture`) and must be merged back in
+        # here, or every resolved item reads as a single unit regardless of
+        # how many the customer actually ordered.
+        quantities: dict[str, Any] = {
+            item.get("productId"): item.get("quantity")
+            for item in order.get("items") or []
+            if item.get("productId")
+        }
+        try:
+            resolved = db.resolve_catalog_items(list(quantities))
+        except Exception:
+            logger.exception(
+                "Falha ao resolver itens do catálogo para o resumo do handover"
+            )
+            resolved = []
+        resolved_items = [
+            {**item, "quantity": quantities.get(item.get("product_id"))}
+            for item in resolved
+        ]
+    return {**order, "resolved_items": resolved_items}
+
+
+def _recent_messages_for_summary(
+    db: Database, contact_id: int, limit: int = 6
+) -> List[MessageRecord]:
+    """Best-effort recent-message fetch feeding `build_contact_summary`'s
+    `history_summary()` base — a failure must not break the notification."""
+    try:
+        return db.get_recent_messages(contact_id, limit=limit)
+    except Exception:
+        logger.exception("Falha ao carregar histórico para o resumo do handover")
+        return []
 
 
 def format_waiting_list(
@@ -79,10 +245,17 @@ def format_waiting_list(
         if deadline_note:
             lines.append(f"   Prazo de resposta: {deadline_note}")
         if include_last_message and db is not None:
-            last_msg = db.get_last_inbound_message(contact.id)
-            if last_msg:
-                preview = last_msg[:120] + ("..." if len(last_msg) > 120 else "")
-                lines.append(f"   Última msg: {preview}")
+            # handover-summary-for-agent (Decisão 3, design.md): reuses
+            # `build_contact_summary` instead of the raw 120-char preview this
+            # used to show, so the immediate handover notification and this
+            # on-demand listing never diverge on what they surface.
+            history = _recent_messages_for_summary(db, contact.id)
+            summary = build_contact_summary(
+                contact, contact.session_state, history=history
+            )
+            if summary:
+                for line in summary.split("\n"):
+                    lines.append(f"   {line}")
     lines.append("")
     lines.append(f"Total na fila: {len(contacts)}")
     lines.append(
@@ -156,8 +329,16 @@ def process_new_handover(
     db: Database,
     router,
     contact: WaitingContact | None = None,
+    last_order: dict | None = None,
 ) -> dict:
-    """Notify admins immediately and on batch threshold."""
+    """Notify admins immediately and on batch threshold.
+
+    `last_order` (a catalog order dict from
+    `whatbot/webhook.py::_extract_order`, threaded from
+    `executar_handover_para_secretaria`, or `None`) feeds the order section
+    of `build_contact_summary` when this handover was triggered by a catalog
+    order — see `openspec/changes/handover-summary-for-agent`.
+    """
     result: dict = {"batch_count": db.increment_handover_batch(), "notified": False}
 
     if NOTIFY_IMMEDIATE_ON_HANDOVER and contact is not None:
@@ -172,6 +353,13 @@ def process_new_handover(
         deadline_note = window_deadline_note(contact)
         if deadline_note:
             msg += f"\nPrazo de resposta: {deadline_note}"
+        history = _recent_messages_for_summary(db, contact.id)
+        order_for_summary = _resolve_order_for_summary(db, last_order)
+        summary = build_contact_summary(
+            contact, contact.session_state, last_order=order_for_summary, history=history
+        )
+        if summary:
+            msg += f"\n\n{summary}"
         if notify_admin(router, msg):
             result["immediate"] = True
 
