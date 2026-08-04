@@ -50,7 +50,7 @@ services:
       DATABASE_CONNECTION_URI: postgresql://evolution:evolution@evolution-db:5432/evolution?schema=public
       CACHE_REDIS_ENABLED: "true"
       CACHE_REDIS_URI: "redis://redis:6379/0"
-      AUTHENTICATION_API_KEY: change-me
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
       AUTHENTICATION_JWT_ENABLED: "false"
       WEBHOOK_DRIVER: "http"
       SERVER_URL: http://localhost:8080
