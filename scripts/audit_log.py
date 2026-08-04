@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT))
 
 from whatbot.claim_validator import ClaimValidator
 from whatbot.config import bootstrap_env
-from whatbot.knowledge import KnowledgeStore
+from whatbot.knowledge import KnowledgeStore, resolve_knowledge_path
 from whatbot.knowledge_facts import build_facts_from_base, reset_knowledge_facts_cache
 from whatbot.message_log import resolve_message_log_path
 from whatbot.session_state import SessionState
@@ -21,7 +21,7 @@ from whatbot.session_state import SessionState
 
 def audit_log(path: Path) -> int:
     bootstrap_env()
-    store = KnowledgeStore(path=ROOT / "knowledge" / "associacao.md")
+    store = KnowledgeStore(path=resolve_knowledge_path())
     store.reload()
     reset_knowledge_facts_cache()
     facts = build_facts_from_base(store.get())

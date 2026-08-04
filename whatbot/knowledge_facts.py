@@ -129,7 +129,7 @@ class ExperimentalSlot:
 class KnowledgeFacts:
     """Canonical facts extracted from the knowledge base."""
 
-    association_name: str
+    business_name: str
     modalidade_names: List[str]
     experimental_slots: List[ExperimentalSlot] = field(default_factory=list)
     regular_days_by_modalidade: Dict[str, List[str]] = field(default_factory=dict)
@@ -207,9 +207,9 @@ class KnowledgeFacts:
         return scores
 
 
-def _parse_experimental_slots(matricula_text: str, base: KnowledgeBase) -> List[ExperimentalSlot]:
+def _parse_experimental_slots(como_comprar_text: str, base: KnowledgeBase) -> List[ExperimentalSlot]:
     slots: list[ExperimentalSlot] = []
-    for line in matricula_text.splitlines():
+    for line in como_comprar_text.splitlines():
         stripped = line.strip()
         if not stripped.startswith("- "):
             continue
@@ -324,7 +324,7 @@ _BASE_INTENT_SIGNALS: Dict[str, Set[str]] = {
         "entrega", "entregas", "entregar", "prazo", "demora", "correios",
         "frete", "envio", "enviar", "retirada", "retirar",
     },
-    "matricula": {
+    "pedido": {
         "matricula", "matrícula", "inscrever", "inscricao", "inscrição",
         "cadastrar", "encomendar", "encomenda", "pedido", "comprar",
     },
@@ -365,8 +365,8 @@ def _build_intent_signals(base: KnowledgeBase) -> Dict[str, Set[str]]:
             if any(t in kn for t in ("horario", "frequencia")):
                 signals["horarios"].add(kn)
 
-    matricula = base.secoes.get("matricula e pagamentos", "")
-    if "experimental" in norm_text(matricula):
+    como_comprar = base.secoes.get("como comprar e pagamento", "")
+    if "experimental" in norm_text(como_comprar):
         signals["experimental"].update(
             {"experimental", "experimentar", "aula experimental"}
         )
@@ -384,7 +384,7 @@ def _build_intent_signals(base: KnowledgeBase) -> Dict[str, Set[str]]:
             for item in base.modalidades.values()
             for tok in re.findall(r"[a-z]+", norm_text(item.nome))
         }
-        for line in matricula.splitlines():
+        for line in como_comprar.splitlines():
             if "experimental" in norm_text(line):
                 line_tokens = (
                     _tokens_from_bullets(line)
@@ -429,7 +429,7 @@ def _build_intent_signals(base: KnowledgeBase) -> Dict[str, Set[str]]:
     if contato:
         signals["faq"].update({"endereco", "endereço", "onde fica", "local", "maps"})
 
-    sobre = base.secoes.get("sobre a associacao", "")
+    sobre = base.secoes.get("sobre", "")
     if sobre:
         signals["faq"].update({"sobre", "quem"})
 
@@ -437,12 +437,12 @@ def _build_intent_signals(base: KnowledgeBase) -> Dict[str, Set[str]]:
 
 
 def build_facts_from_base(base: KnowledgeBase) -> KnowledgeFacts:
-    matricula = base.secoes.get("matricula e pagamentos", "")
+    como_comprar = base.secoes.get("como comprar e pagamento", "")
     monthly, semester, known = _parse_prices(base)
     return KnowledgeFacts(
-        association_name=base.titulo,
+        business_name=base.titulo,
         modalidade_names=[item.nome for item in base.modalidades.values()],
-        experimental_slots=_parse_experimental_slots(matricula, base),
+        experimental_slots=_parse_experimental_slots(como_comprar, base),
         regular_days_by_modalidade=_parse_regular_days(base),
         monthly_price=monthly,
         semester_price=semester,

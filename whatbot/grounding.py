@@ -12,7 +12,7 @@ from .knowledge import get_knowledge_store
 from .knowledge_facts import get_knowledge_facts
 from .reply_composer import default_closing, get_reply_composer
 from .session_state import SessionState
-from .tools import buscar_faq, buscar_info_associacao, buscar_precos, listar_modalidades
+from .tools import buscar_faq, buscar_info_negocio, buscar_precos, listar_modalidades
 
 logger = logging.getLogger("whatbot.grounding")
 
@@ -224,8 +224,8 @@ def build_knowledge_reply(user_message: str, session: SessionState | None = None
         if prices:
             parts.append(prices)
 
-    if any(token in norm for token in ("experimental", "matricula", "matrícula", "inscri")):
-        enrollment = buscar_info_associacao("matrícula")
+    if any(token in norm for token in ("experimental", "matricula", "matrícula", "inscri", "encomend", "comprar")):
+        enrollment = buscar_info_negocio("como comprar")
         if enrollment and "não encontrei" not in enrollment.lower():
             parts.append(enrollment.strip())
 

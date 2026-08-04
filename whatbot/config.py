@@ -19,7 +19,7 @@ SYSTEM_PROMPTS: Dict[str, str] = {
         "Encaminhe para atendimento humano SOMENTE se o cliente pedir ou se a informação "
         "não existir na base (use [HUMAN_HANDOVER])."
     ),
-    "matriculado": (
+    "cliente_ativo": (
         "ATENDIMENTO: Você ajuda clientes já cadastrados com pedidos, pagamentos e dúvidas. "
         "Use apenas a base de conhecimento abaixo. Resposta conversacional em português. "
         "Use [HUMAN_HANDOVER] apenas se o cliente pedir humano ou faltar informação essencial."
@@ -91,11 +91,11 @@ def get_timezone() -> str:
 AUTO_REACTIVATE_HOURS = int(os.getenv("AUTO_REACTIVATE_HOURS", "24"))
 DEFAULT_TEST_PHONE = os.getenv("DEFAULT_TEST_PHONE", "5511999999999")
 FALLBACK_SIMULATE_PHONE = "5511999999999"
-ENV_ASSOCIATION_PHONE = "ASSOCIATION_PHONE"
+ENV_BUSINESS_PHONE = "BUSINESS_PHONE"
 
 
-def get_association_phone() -> str | None:
-    raw = os.getenv(ENV_ASSOCIATION_PHONE, "").strip()
+def get_business_phone() -> str | None:
+    raw = os.getenv(ENV_BUSINESS_PHONE, "").strip()
     if not raw:
         return None
     import re
@@ -105,13 +105,13 @@ def get_association_phone() -> str | None:
 
 
 def resolve_simulate_phone(sim_phone: str | None = None) -> str:
-    """Phone used as fake customer in admin simulations (never the association line)."""
+    """Phone used as fake customer in admin simulations (never the business's own line)."""
     import re
 
     raw = (sim_phone or DEFAULT_TEST_PHONE or FALLBACK_SIMULATE_PHONE).strip()
     digits = re.sub(r"\D", "", raw.split("@")[0])
-    assoc = get_association_phone()
-    if assoc and digits == assoc:
+    business_phone = get_business_phone()
+    if business_phone and digits == business_phone:
         digits = re.sub(r"\D", "", FALLBACK_SIMULATE_PHONE)
     return digits or FALLBACK_SIMULATE_PHONE
 

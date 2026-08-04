@@ -48,10 +48,10 @@ class TestAdminNlu(unittest.TestCase):
         self.assertTrue(is_casual_test_message("olá!"))
         self.assertFalse(is_casual_test_message("quem ta na fila?"))
 
-    def test_resolve_simulate_phone_avoids_association(self):
+    def test_resolve_simulate_phone_avoids_business_line(self):
         import os
 
-        os.environ["ASSOCIATION_PHONE"] = "5511949305094"
+        os.environ["BUSINESS_PHONE"] = "5511949305094"
         os.environ["DEFAULT_TEST_PHONE"] = "5511949305094"
         self.assertEqual(resolve_simulate_phone(None), "5511999999999")
         self.assertEqual(resolve_simulate_phone("5511888888888"), "5511888888888")

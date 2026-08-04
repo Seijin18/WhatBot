@@ -6,7 +6,7 @@ from .knowledge_facts import get_knowledge_facts, norm_text
 from .tools import (
     buscar_faq,
     buscar_horarios_turmas,
-    buscar_info_associacao,
+    buscar_info_negocio,
     buscar_precos,
     listar_modalidades,
 )
@@ -41,7 +41,7 @@ def build_knowledge_fallback(user_message: str, reason: str = "error") -> str | 
     elif any(token in norm for token in price_signals):
         parts.append(buscar_precos(""))
     elif any(token in norm for token in faq_signals if token in {"endereco", "endereço", "onde", "local"}):
-        parts.append(buscar_info_associacao("endereço"))
+        parts.append(buscar_info_negocio("endereço"))
     elif any(token in norm for token in horario_signals):
         parts.append(listar_modalidades())
     else:

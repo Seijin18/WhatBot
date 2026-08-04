@@ -67,7 +67,7 @@ def update_session_state(
     state.topico_atual = intent
     if intent == "experimental":
         state.aguardando_dados_experimental = True
-    elif intent in {"precos", "pagamento", "entrega", "matricula", "horarios", "greeting", "faq"}:
+    elif intent in {"precos", "pagamento", "entrega", "pedido", "horarios", "greeting", "faq"}:
         state.aguardando_dados_experimental = False
     return state
 

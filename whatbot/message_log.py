@@ -179,7 +179,7 @@ def log_llm_turn(
             "llm_provider": llm_provider or os.getenv("LLM_PROVIDER", "gemini"),
             "llm_model": llm_model,
             "knowledge_path": knowledge_path or os.getenv(
-                "ASSOCIACAO_KNOWLEDGE_PATH", "knowledge/associacao.md"
+                "KNOWLEDGE_PATH", "knowledge/base.md"
             ),
             "simulated": simulated,
             **extra,

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-PRIORITY_KEYWORDS = [
+# Two business shapes this bot supports (see
+# docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.8): class/service enrollment
+# ("matrícula") and direct product orders ("pedido"/"compra"). A hot lead in
+# either shape scores the same; neither list assumes the other is absent.
+_ENROLLMENT_KEYWORDS = [
     "matricula",
     "matricular",
     "matrícula",
@@ -15,14 +19,9 @@ PRIORITY_KEYWORDS = [
     "fazer matrícula",
     "vaga",
     "vagas",
-    "preco",
-    "preço",
-    "valor",
-    "quanto custa",
-    # Non-enrollment "ready to buy" signals — a customer asking to place an
-    # order is just as much a hot lead as one asking to enroll, but the
-    # original list only covered class/enrollment vocabulary (see
-    # docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.8).
+]
+
+_ORDER_KEYWORDS = [
     "encomendar",
     "encomenda",
     "comprar",
@@ -33,6 +32,15 @@ PRIORITY_KEYWORDS = [
     "fechar pedido",
     "fechar compra",
 ]
+
+_PRICE_KEYWORDS = [
+    "preco",
+    "preço",
+    "valor",
+    "quanto custa",
+]
+
+PRIORITY_KEYWORDS = _ENROLLMENT_KEYWORDS + _ORDER_KEYWORDS + _PRICE_KEYWORDS
 
 
 def calcular_prioridade_handover(user_message: str) -> int:

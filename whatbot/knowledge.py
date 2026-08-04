@@ -34,7 +34,7 @@ class KnowledgeBase:
         return sorted(self.modalidades.keys())
 
     def titulo_secao(self, key: str) -> str:
-        """Original heading text for a section (e.g. "Matrícula e pagamentos"),
+        """Original heading text for a section (e.g. "Como comprar e pagamento"),
         keyed by its normalized form. Falls back to a title-cased version of
         the key itself when the section isn't in the file (or, since the
         normalized key is ASCII-folded, loses accents as a last resort)."""
@@ -104,7 +104,7 @@ def _parse_bullet_fields(lines: List[str]) -> Dict[str, str]:
 
 def _parse_markdown(text: str) -> KnowledgeBase:
     lines = text.splitlines()
-    titulo = "Associação"
+    titulo = "Negócio"
     if lines and lines[0].startswith("# "):
         titulo = lines[0][2:].strip()
 
@@ -177,17 +177,17 @@ def _project_root() -> Path:
 
 
 def resolve_knowledge_path(path: str | None = None) -> Path:
-    """Resolve ASSOCIACAO_KNOWLEDGE_PATH relative to the project root."""
-    raw = (path or os.getenv("ASSOCIACAO_KNOWLEDGE_PATH", "")).strip()
+    """Resolve KNOWLEDGE_PATH relative to the project root."""
+    raw = (path or os.getenv("KNOWLEDGE_PATH", "")).strip()
     if raw:
         resolved = Path(raw)
         if not resolved.is_absolute():
             resolved = _project_root() / resolved
         return resolved
-    default = _project_root() / "knowledge" / "associacao.md"
+    default = _project_root() / "knowledge" / "base.md"
     if default.exists():
         return default
-    return Path("knowledge/associacao.md")
+    return Path("knowledge/base.md")
 
 
 def default_knowledge_path() -> Path:
@@ -266,14 +266,9 @@ class KnowledgeStore:
     def registered_modalidade_names(self) -> List[str]:
         return [item.nome for item in self.get().modalidades.values()]
 
-    def association_label(self) -> str:
-        """Short association name extracted from the knowledge file."""
-        base = self.get()
-        sobre = base.secoes.get("sobre a associacao", "")
-        match = re.search(r"associaç[aã]o\s+([^,\.\n]+)", sobre, re.I)
-        if match:
-            return match.group(1).strip()
-        return base.titulo
+    def business_label(self) -> str:
+        """Short business name from the knowledge file's title."""
+        return self.get().titulo
 
     def format_grounding_rules_for_prompt(self) -> str:
         """Behavior rules derived from the current knowledge file (not hardcoded).
@@ -284,7 +279,7 @@ class KnowledgeStore:
         business, e.g. a product catalog) — see
         docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.8.
         """
-        label = self.association_label()
+        label = self.business_label()
         return "\n".join(
             [
                 "REGRAS DE ATENDIMENTO:",
@@ -308,9 +303,9 @@ class KnowledgeStore:
         parts = [
             f"NOME OFICIAL: {base.titulo}",
         ]
-        sobre = base.secoes.get("sobre a associacao")
+        sobre = base.secoes.get("sobre")
         if sobre:
-            parts.extend(["", f"{base.titulo_secao('sobre a associacao')}:", sobre])
+            parts.extend(["", f"{base.titulo_secao('sobre')}:", sobre])
         contato = base.secoes.get("endereco e contato")
         if contato:
             parts.extend(["", f"{base.titulo_secao('endereco e contato')}:", contato])
@@ -332,9 +327,11 @@ class KnowledgeStore:
         precos = base.secoes.get("precos")
         if precos:
             parts.extend(["", f"{base.titulo_secao('precos')}:", precos])
-        matricula = base.secoes.get("matricula e pagamentos")
-        if matricula:
-            parts.extend(["", f"{base.titulo_secao('matricula e pagamentos')}:", matricula])
+        como_comprar = base.secoes.get("como comprar e pagamento")
+        if como_comprar:
+            parts.extend(
+                ["", f"{base.titulo_secao('como comprar e pagamento')}:", como_comprar]
+            )
         if base.faq:
             parts.append("")
             parts.append("FAQ:")
@@ -374,7 +371,7 @@ class KnowledgeStore:
                 parts.append(desconto)
             return ". ".join(parts)
 
-        matricula = base.secoes.get("matricula e pagamentos", "")
+        como_comprar = base.secoes.get("como comprar e pagamento", "")
         precos = base.secoes.get("precos", "")
         lines: list[str] = []
         # Only businesses with a `## Modalidades` section (class schedules,
@@ -395,10 +392,10 @@ class KnowledgeStore:
                 lines.append("")
             lines.append(f"{base.titulo_secao('precos')}:")
             lines.append(precos)
-        if matricula:
+        if como_comprar:
             lines.append("")
-            lines.append(f"{base.titulo_secao('matricula e pagamentos')}:")
-            lines.append(matricula)
+            lines.append(f"{base.titulo_secao('como comprar e pagamento')}:")
+            lines.append(como_comprar)
         return "\n".join(lines) if lines else "Preços não cadastrados no momento."
 
     def buscar_info(self, topico: str) -> str:

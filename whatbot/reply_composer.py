@@ -9,7 +9,7 @@ from .intent_router import (
     INTENT_FAQ,
     INTENT_GREETING,
     INTENT_HORARIOS,
-    INTENT_MATRICULA,
+    INTENT_PEDIDO,
     INTENT_PRECOS,
     INTENT_UNKNOWN,
     IntentResult,
@@ -17,7 +17,7 @@ from .intent_router import (
 )
 from .knowledge_facts import KnowledgeFacts, day_label, extract_days, get_knowledge_facts, norm_text
 from .session_state import SessionState
-from .tools import buscar_faq, buscar_horarios_turmas, buscar_info_associacao, buscar_precos
+from .tools import buscar_faq, buscar_horarios_turmas, buscar_info_negocio, buscar_precos
 
 _GENERIC_CLOSING = "Se precisar de mais alguma coisa, é só me chamar."
 _EXPERIMENTAL_CLOSING = (
@@ -58,7 +58,7 @@ class ReplyComposer:
             INTENT_HORARIOS: self._compose_horarios,
             INTENT_PRECOS: self._compose_precos,
             INTENT_EXPERIMENTAL: self._compose_experimental,
-            INTENT_MATRICULA: self._compose_matricula,
+            INTENT_PEDIDO: self._compose_pedido,
             INTENT_FAQ: self._compose_faq,
             INTENT_UNKNOWN: self._compose_faq,
         }
@@ -112,7 +112,7 @@ class ReplyComposer:
     def _compose_greeting(
         self, user_message: str, session: SessionState, intent: IntentResult
     ) -> str:
-        label = self._facts.association_name
+        label = self._facts.business_name
         if self._facts.modalidade_names:
             mods = ", ".join(self._facts.modalidade_names)
             return (
@@ -249,10 +249,10 @@ class ReplyComposer:
             f"{self._closing()}"
         )
 
-    def _compose_matricula(
+    def _compose_pedido(
         self, user_message: str, session: SessionState, intent: IntentResult
     ) -> str:
-        info = buscar_info_associacao("matrícula")
+        info = buscar_info_negocio("como comprar")
         return f"{info}\n\n{self._closing()}"
 
     def _compose_faq(
@@ -260,10 +260,10 @@ class ReplyComposer:
     ) -> str | None:
         norm = norm_text(user_message)
         faq_signals = self._facts.intent_signals.get(INTENT_FAQ, set())
-        if any(token in norm for token in faq_signals if token in {"quem", "sobre", "associacao", "nome"}):
-            info = buscar_info_associacao("sobre a associação")
+        if any(token in norm for token in faq_signals if token in {"quem", "sobre", "nome"}):
+            info = buscar_info_negocio("sobre")
             if info and "não encontrei" not in info.lower():
-                body = info.replace("Sobre a associação:", "").replace("Sobre:", "").strip()
+                body = info.replace("Sobre:", "").strip()
                 return f"{body}\n\n{self._closing()}"
 
         faq = buscar_faq(user_message)

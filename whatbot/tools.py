@@ -1,4 +1,4 @@
-"""Agent tools backed by the association knowledge Markdown file."""
+"""Agent tools backed by the business knowledge Markdown file."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def buscar_precos(modalidade: str = "") -> str:
     return get_knowledge_store().buscar_precos(modalidade or None)
 
 
-def buscar_info_associacao(topico: str) -> str:
+def buscar_info_negocio(topico: str) -> str:
     """Busca informações gerais sobre o negócio.
 
     Args:
@@ -82,7 +82,7 @@ AGENT_TOOLS = [
     listar_modalidades,
     buscar_horarios_turmas,
     buscar_precos,
-    buscar_info_associacao,
+    buscar_info_negocio,
     buscar_faq,
     encaminhar_para_secretaria,
 ]

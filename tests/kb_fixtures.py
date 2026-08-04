@@ -1,6 +1,6 @@
 """Synthetic knowledge-base fixtures for tests.
 
-Tests must never depend on `knowledge/associacao.md` (the real, deployable
+Tests must never depend on `knowledge/base.md` (the real, deployable
 business content) — that file changes whenever the deployed business
 changes, and several tests broke exactly that way when it was swapped from
 a sports-class association to a made-to-order product catalog (see
@@ -29,7 +29,7 @@ from whatbot.knowledge_facts import reset_knowledge_facts_cache
 
 CLASS_SCHEDULE_KB = """# Associação Desportiva e Cultural
 
-## Sobre a associação
+## Sobre
 
 Agradecemos o seu contato! Somos a associação Kannon Do, uma associação desportiva e cultural com aulas de judô e yoga. Para agendar aula experimental ou matrícula, entre em contato pelo atendimento ou responda com os dados solicitados na seção de aula experimental.
 
@@ -86,7 +86,7 @@ Agradecemos o seu contato! Somos a associação Kannon Do, uma associação desp
 - Plano semestral: R$ 840 (1 aluno)
 - Desconto para o 2º integrante da mesma família
 
-## Matrícula e pagamentos
+## Como comprar e pagamento
 
 - Aula experimental: disponível para judô e yoga — preencher nome, idade, celular/telefone e dia desejado
 - Dias disponíveis para aula experimental de judô: quinta-feira (5ªf)
@@ -123,7 +123,7 @@ Judô e yoga: plano mensal R$ 150 (1 aluno) ou plano semestral R$ 840 (1 aluno).
 
 CATALOG_KB = """# Ateliê Fictício de Teste
 
-## Sobre a associação
+## Sobre
 
 Somos o Ateliê Fictício, especializado em produtos artesanais personalizados feitos sob encomenda.
 
@@ -142,7 +142,7 @@ Produto personalizado:
 
 Frete: calculado por pedido conforme a distância até o destino.
 
-## Matrícula e pagamentos
+## Como comprar e pagamento
 
 Como encomendar um produto personalizado:
 

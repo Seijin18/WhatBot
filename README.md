@@ -59,7 +59,7 @@ Use `.env` na raiz (modelo em [`.env.example`](.env.example)). Principais variá
 | `GEMINI_API_KEY` | Chave Google Gemini (`google-genai`) |
 | `GEMINI_MODEL` | Modelo (padrão no código: `gemini-2.5-flash`) |
 | `ADMIN_NOTIFY_PHONES` | Números admin para alertas e comandos de fila |
-| `ASSOCIACAO_KNOWLEDGE_PATH` | Base de conhecimento (`knowledge/associacao.md`) |
+| `KNOWLEDGE_PATH` | Base de conhecimento (`knowledge/base.md`) |
 
 O `docker-compose.yml` não contém segredos reais. Variáveis essenciais em placeholder fazem o app falhar no startup com erro explícito.
 
@@ -77,7 +77,7 @@ python scripts/health_check.py
 
 - `whatbot/main.py` — entrypoint Windmill `main(payload: dict)`
 - `whatbot/config.py` — prompts, timezone e variáveis de ambiente
-- `whatbot/knowledge.py` — leitura da base (`knowledge/associacao.md`)
+- `whatbot/knowledge.py` — leitura da base (`knowledge/base.md`)
 - `whatbot/tools.py` — ferramentas Gemini (function calling)
 - `whatbot/db.py` — Postgres (contatos, mensagens, fila)
 - `whatbot/whatsapp.py` — cliente Evolution API
@@ -89,7 +89,7 @@ python scripts/health_check.py
 - `windmill/f/whatbot/` — scripts publicados no Windmill
 - `scripts/` — pareamento, webhook, health check
 
-Edite `knowledge/associacao.md` para modalidades, preços, FAQ e contatos. Formato em [`knowledge/README.md`](knowledge/README.md).
+Edite `knowledge/base.md` para produtos/modalidades, preços, FAQ e contatos. Formato em [`knowledge/README.md`](knowledge/README.md).
 
 ## Desenvolvimento local (sem Docker)
 

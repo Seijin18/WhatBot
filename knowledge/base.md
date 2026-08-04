@@ -1,6 +1,6 @@
 # Camu (@camu3d)
 
-## Sobre a associação
+## Sobre
 
 Agradecemos o seu contato! Somos a Camu (@camu3d), um ateliê de colecionáveis 3D impressos, especializados em miniaturas personalizadas de pets e outros itens de decoração. Trabalhamos com impressão 3D e acabamento artesanal, feito sob encomenda.
 
@@ -26,7 +26,7 @@ Pato de tricô: R$ 24,90
 
 Frete: não incluso nos preços acima — calculado por pedido conforme a distância até o destino, enviado pelos Correios.
 
-## Matrícula e pagamentos
+## Como comprar e pagamento
 
 Como encomendar uma miniatura de pet personalizada:
 

@@ -21,7 +21,7 @@ class TestKnowledgeParser(unittest.TestCase):
         )
         self.assertIn("judo infantil", base.modalidades)
         self.assertTrue(base.faq)
-        self.assertIn("sobre a associacao", base.secoes)
+        self.assertIn("sobre", base.secoes)
 
     def test_store_reload_on_access(self):
         store = load_class_schedule_kb()
@@ -55,12 +55,12 @@ class TestKnowledgeParser(unittest.TestCase):
     def test_parse_catalog_without_modalidades(self):
         """A KB with no `## Modalidades` section (product catalog, not
         class schedules) must still parse cleanly — `modalidades` stays
-        empty rather than erroring, and `Preços`/`Matrícula e pagamentos`
+        empty rather than erroring, and `Preços`/`Como comprar e pagamento`
         parse as plain sections."""
         base = _parse_markdown(CATALOG_KB)
         self.assertEqual(base.modalidades, {})
         self.assertIn("precos", base.secoes)
-        self.assertIn("matricula e pagamentos", base.secoes)
+        self.assertIn("como comprar e pagamento", base.secoes)
         self.assertTrue(base.faq)
 
     def test_buscar_precos_catalog_has_no_modalidade_heading(self):
@@ -87,11 +87,11 @@ class TestKnowledgeParser(unittest.TestCase):
     def test_buscar_faq_uses_real_section_heading(self):
         """FAQ/section titles come from the file's own heading text, not a
         hardcoded translation (see docs/REVISAO_CAMADA_CONVERSACIONAL.md,
-        P1.1 — the previous code always printed "Matrícula e pagamentos:"
-        even when that heading didn't describe the section's content)."""
+        P1.1 — the previous code always printed a fixed translated header
+        even when it didn't describe the section's content)."""
         store = load_catalog_kb()
-        res = store.buscar_info("matrícula")
-        self.assertIn("Matrícula e pagamentos:", res)
+        res = store.buscar_info("como comprar")
+        self.assertIn("Como comprar e pagamento:", res)
         self.assertIn("Como encomendar", res)
 
 
@@ -109,7 +109,7 @@ class TestAgentTools(unittest.TestCase):
         self.assertIn("18:30", res)
 
     def test_execute_tool(self):
-        res = tools.execute_tool("buscar_info_associacao", {"topico": "matrícula"})
+        res = tools.execute_tool("buscar_info_negocio", {"topico": "como comprar"})
         self.assertIn("experimental", res.lower())
 
 
