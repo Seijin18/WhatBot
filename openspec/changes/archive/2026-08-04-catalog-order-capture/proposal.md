@@ -51,11 +51,17 @@ assumir essa possibilidade, não é um caso raro hipotético.
 
 ## Impact
 
-- Specs afetadas: `catalog` (capability nova)
+- Specs afetadas: `catalog` (capability nova); `contacts` (satisfaz, não
+  modifica, o requirement "Pedido de catálogo força estágio 'comprando'"
+  já introduzido por `contact-interest-memory` — este change é quem liga
+  `has_order` de fato, descoberto durante a revisão da implementação)
 - Código alterado: `whatbot/webhook.py`, `whatbot/priority.py`,
-  `whatbot/domain.py` (ponto de chamada do handover)
+  `whatbot/domain.py` (ponto de chamada do handover), `whatbot/main.py`
+  (liga `order` a `next_status`/`db.set_contact_status`, guardado por
+  `not simulated`)
 - Testes alterados: suíte de `whatbot/webhook.py` (payloads Android/iOS
-  sintéticos), `tests/test_main_e2e.py` (fluxo completo: pedido → handover)
+  sintéticos), `tests/test_main_e2e.py` (fluxo completo: pedido → handover
+  → estágio `comprando`)
 - Bloqueado por: nenhum
 - Habilita (não bloqueia): `catalog-product-sync` (resolve nome/preço dos
   itens capturados aqui), `handover-summary-for-agent` (usa o `order`

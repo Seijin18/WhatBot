@@ -329,6 +329,7 @@ def process_customer_message(
     canal: str | None = None,
     history_override: list | None = None,
     session_override: SessionState | None = None,
+    order: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Handle an inbound customer message (or admin simulation).
 
@@ -339,6 +340,10 @@ def process_customer_message(
     turns without ever touching the real `sim_phone` contact's actual
     history (which stays untouched, exactly like every other `simulated`
     guard in this function).
+
+    `order` is the catalog order dict attached by
+    `whatbot.webhook.parse_evolution_payload` (or `None`) — its presence
+    forces an unconditional handover below (catalog-order-capture).
     """
     canal = normalize_channel(canal)
     queue_check: Dict[str, Any] = {}
@@ -428,7 +433,33 @@ def process_customer_message(
         ia_ativa=contact.ia_ativa,
     )
 
-    if detectar_pedido_atendimento_humano(text):
+    if order is not None or detectar_pedido_atendimento_humano(text):
+        # A catalog order always triggers handover unconditionally,
+        # regardless of `items_identifiable` — see
+        # openspec/changes/catalog-order-capture/design.md, Decisão 3.
+        motivo = "pedido_catalogo" if order is not None else "pedido_do_cliente"
+        if order is not None and not simulated:
+            # Requirement "Estágio do contato transiciona automaticamente"
+            # (openspec/specs/contacts/spec.md): a real catalog order forces
+            # `contatos.status` to "comprando" immediately, regardless of
+            # `items_identifiable`. Reuses the same `next_status` rule the
+            # rest of this function relies on for status transitions
+            # (`has_order=True` short-circuits before touching
+            # `session`/`intent`, so a placeholder `SessionState` is fine
+            # here — session/intent routing never runs on this early-return
+            # path). Guarded by `not simulated`, same as every other status
+            # write in this function.
+            try:
+                new_status = next_status(
+                    contact.status, SessionState(), "", has_order=True
+                )
+                if new_status is not None:
+                    _db.set_contact_status(contact.id, new_status)
+                    contact.status = new_status
+            except Exception:
+                logger.exception(
+                    "Falha ao atualizar status do contato para pedido de catálogo"
+                )
         try:
             result = executar_handover_para_secretaria(
                 phone=phone,
@@ -436,11 +467,12 @@ def process_customer_message(
                 router=_router,
                 db=_db,
                 logger=logger,
-                motivo="pedido_do_cliente",
+                motivo=motivo,
                 push_name=push_name,
                 user_message=text,
                 simulated=simulated,
                 canal=canal,
+                order=order,
             )
             result["queue_check"] = queue_check
             result["simulated"] = simulated
@@ -468,10 +500,11 @@ def process_customer_message(
     intent_result = route_intent(text, session, history)
     session = update_session_state(session, intent_result.intent, intent_result.items)
 
-    # `has_order` becomes `payload.get("order") is not None` once
-    # `catalog-order-capture` adds an `order` key to the inbound payload
-    # (that change is not implemented yet, so this is always `False` today —
-    # purchase intent is detected purely from `intent_result.intent`).
+    # A catalog order (`order` not `None`) always short-circuits into the
+    # handover branch above — which already forces `comprando` there — and
+    # returns before reaching this line, so `has_order` is unreachably
+    # always `False` here; purchase intent for `next_status` on this path is
+    # detected purely from `intent_result.intent`.
     has_order = False
     new_status = next_status(contact.status, session, intent_result.intent, has_order)
     if new_status is not None and not simulated:
@@ -843,6 +876,7 @@ def _dispatch_payload(
     )
     text = (payload.get("text") or payload.get("message") or "").strip()
     push_name = payload.get("push_name")
+    order = payload.get("order")
 
     if not phone or not text:
         if original.get("event"):
@@ -926,7 +960,9 @@ def _dispatch_payload(
         )
         return {"ok": True, "ignored": True, "reason": "test_mode"}
 
-    return process_customer_message(phone, text, push_name=push_name, canal=canal)
+    return process_customer_message(
+        phone, text, push_name=push_name, canal=canal, order=order
+    )
 
 
 if __name__ == "__main__":

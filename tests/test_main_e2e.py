@@ -60,6 +60,31 @@ def evolution_payload(
     }
 
 
+def evolution_order_payload(
+    phone: str,
+    order_message: dict,
+    push_name: str = "Maria",
+    msg_id: str | None = None,
+) -> dict:
+    """A customer catalog order exactly as the Evolution API webhook
+    delivers it (`message.orderMessage`) — catalog-order-capture."""
+    if msg_id is None:
+        msg_id = f"MSG{next(_msg_id_counter)}"
+    return {
+        "event": "messages.upsert",
+        "instance": "whatbot",
+        "data": {
+            "key": {
+                "remoteJid": f"{phone}@s.whatsapp.net",
+                "fromMe": False,
+                "id": msg_id,
+            },
+            "pushName": push_name,
+            "message": {"orderMessage": order_message},
+        },
+    }
+
+
 def staff_reply_payload(phone: str, text: str = "Oi, já te respondo") -> dict:
     """A `fromMe` message: the secretariat answering from WhatsApp Business."""
     return {
@@ -192,6 +217,119 @@ class TestChannelRouting(MainE2ETestCase):
         waiting = self.db.get_waiting_contacts()
         self.assertEqual(len(waiting), 1)
         self.assertEqual(waiting[0].phone, CUSTOMER_PHONE)
+
+
+class TestCatalogOrderCapture(MainE2ETestCase):
+    """catalog-order-capture: um pedido do catálogo do WhatsApp
+    (`orderMessage`) nunca é descartado e sempre dispara handover
+    automático com prioridade 1, identificável (Android) ou não (iOS)."""
+
+    def _android_order_message(self) -> dict:
+        return {
+            "orderId": "ORD-42",
+            "itemCount": 2,
+            "orderTitle": "Pedido de camisetas",
+            "items": [
+                {"productId": "PROD-1", "quantity": 1},
+                {"productId": "PROD-2", "quantity": 3},
+            ],
+        }
+
+    def _ios_order_message(self) -> dict:
+        # iOS orders arrive without productId/retailerId on any item, and
+        # orderTitle holds the Evolution instance name, not the order's
+        # actual title (evolution-foundation/evolution-api#1819).
+        return {
+            "orderId": "ORD-43",
+            "itemCount": 1,
+            "orderTitle": "whatbot",
+            "items": [],
+        }
+
+    def test_android_order_triggers_handover_with_priority_1(self):
+        result = main_mod.main(
+            evolution_order_payload(CUSTOMER_PHONE, self._android_order_message())
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["handed_to_human"])
+        self.assertEqual(result["prioridade"], 1)
+
+        waiting = self.db.get_waiting_contacts()
+        self.assertEqual(len(waiting), 1)
+        self.assertEqual(waiting[0].phone, CUSTOMER_PHONE)
+
+        # Customer got a handover confirmation, admin was notified.
+        recipients = {m["to"] for m in self.wa.sent}
+        self.assertEqual(recipients, {CUSTOMER_PHONE, ADMIN_PHONE})
+
+    def test_ios_order_without_identifiable_items_still_triggers_handover(self):
+        result = main_mod.main(
+            evolution_order_payload(CUSTOMER_PHONE, self._ios_order_message())
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["handed_to_human"])
+        self.assertEqual(result["prioridade"], 1)
+
+        waiting = self.db.get_waiting_contacts()
+        self.assertEqual(len(waiting), 1)
+        self.assertEqual(waiting[0].phone, CUSTOMER_PHONE)
+
+    def test_order_message_is_recorded_not_silently_dropped(self):
+        main_mod.main(
+            evolution_order_payload(CUSTOMER_PHONE, self._android_order_message())
+        )
+
+        directions = [m["direction"] for m in self.db.messages]
+        # Inbound synthetic order text, then outbound handover confirmation —
+        # never dropped before reaching persistence/handover.
+        self.assertIn("in", directions)
+        self.assertIn("out", directions)
+
+    def test_regular_message_without_order_is_unaffected(self):
+        result = self.customer_sends("Quais modalidades vocês têm?")
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result.get("handed_to_human"))
+        self.assertEqual(self.db.get_waiting_contacts(), [])
+
+    def test_android_order_forces_status_comprando(self):
+        """openspec/specs/contacts/spec.md, Requirement "Estágio do contato
+        transiciona automaticamente", cenário "Pedido de catálogo força
+        estágio comprando": um pedido real do catálogo (identificável ou
+        não) leva `contatos.status` a `comprando` imediatamente."""
+        self.db.create_contact(phone=CUSTOMER_PHONE, push_name="Maria")
+
+        main_mod.main(
+            evolution_order_payload(CUSTOMER_PHONE, self._android_order_message())
+        )
+
+        contact = self.db.get_contact_by_phone(CUSTOMER_PHONE)
+        self.assertEqual(contact.status, "comprando")
+
+    def test_ios_order_without_identifiable_items_also_forces_status_comprando(self):
+        """The spec does not distinguish by `items_identifiable` — both
+        Android and iOS orders force `comprando`."""
+        self.db.create_contact(phone=CUSTOMER_PHONE, push_name="Maria")
+
+        main_mod.main(
+            evolution_order_payload(CUSTOMER_PHONE, self._ios_order_message())
+        )
+
+        contact = self.db.get_contact_by_phone(CUSTOMER_PHONE)
+        self.assertEqual(contact.status, "comprando")
+
+    def test_order_from_interessado_also_advances_to_comprando(self):
+        contact = self.db.create_contact(phone=CUSTOMER_PHONE, push_name="Maria")
+        self.db.set_contact_status(contact.id, "interessado")
+
+        main_mod.main(
+            evolution_order_payload(CUSTOMER_PHONE, self._android_order_message())
+        )
+
+        updated = self.db.get_contact_by_phone(CUSTOMER_PHONE)
+        self.assertEqual(updated.status, "comprando")
 
 
 class TestAdminCommands(MainE2ETestCase):

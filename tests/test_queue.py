@@ -28,6 +28,32 @@ class TestPriority(unittest.TestCase):
     def test_prioridade_label(self):
         self.assertEqual(prioridade_label(1), "🔥 ALTA")
 
+    def test_order_present_forces_priority_1_regardless_of_text(self):
+        """catalog-order-capture, Decisão 3: um pedido do catálogo força
+        prioridade 1 mesmo com um texto sintético neutro, independente de
+        `items_identifiable`."""
+        identifiable_order = {"order_id": "ORD-1", "items_identifiable": True}
+        unidentifiable_order = {"order_id": "ORD-2", "items_identifiable": False}
+
+        self.assertEqual(
+            calcular_prioridade_handover(
+                "[pedido do catálogo] 2 item(ns)", order=identifiable_order
+            ),
+            1,
+        )
+        self.assertEqual(
+            calcular_prioridade_handover(
+                "[pedido do catálogo] itens não identificados",
+                order=unidentifiable_order,
+            ),
+            1,
+        )
+
+    def test_no_order_falls_back_to_keyword_detection(self):
+        self.assertEqual(
+            calcular_prioridade_handover("Qual o horário?", order=None), 0
+        )
+
 
 class TestOutgoingWebhook(unittest.TestCase):
     def test_parse_outgoing_staff_message(self):

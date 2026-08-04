@@ -74,16 +74,21 @@ def executar_handover_para_secretaria(
     simulated: bool = False,
     customer_message: str | None = None,
     canal: str | None = None,
+    order: dict | None = None,
 ) -> dict:
     """Stop the bot, enqueue for secretariat, and notify admin if thresholds met.
 
     The customer is answered on their own channel; admins are always notified on
     the admin channel (WhatsApp).
+
+    `order` (a catalog order dict from `whatbot/webhook.py::_extract_order`,
+    or `None`) forces priority 1 unconditionally when present — see
+    openspec/changes/catalog-order-capture/design.md, Decisão 3.
     """
     from .channels import send_to_contact
     from .queue import check_long_wait_notifications, process_new_handover
 
-    prioridade = calcular_prioridade_handover(user_message or "")
+    prioridade = calcular_prioridade_handover(user_message or "", order=order)
 
     handover_text = customer_message or (
         "Encaminhando você para um atendente. "

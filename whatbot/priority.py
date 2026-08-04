@@ -43,8 +43,15 @@ _PRICE_KEYWORDS = [
 PRIORITY_KEYWORDS = _ENROLLMENT_KEYWORDS + _ORDER_KEYWORDS + _PRICE_KEYWORDS
 
 
-def calcular_prioridade_handover(user_message: str) -> int:
-    """Return 1 for hot leads (enrollment intent), 0 otherwise."""
+def calcular_prioridade_handover(user_message: str, order: dict | None = None) -> int:
+    """Return 1 for hot leads (enrollment intent) or a catalog order, 0 otherwise.
+
+    A catalog order (`order` not `None`) always scores 1, regardless of
+    whether its items are identifiable — the handover is unconditional (see
+    openspec/changes/catalog-order-capture/design.md, Decisão 3).
+    """
+    if order is not None:
+        return 1
     if not user_message:
         return 0
     normalized = user_message.lower()
