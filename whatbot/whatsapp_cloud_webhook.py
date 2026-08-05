@@ -19,13 +19,18 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from .channels import InboundMessage, WHATSAPP
+from .channels import InboundMessage, MediaRef, WHATSAPP
 
 # Event classifications produced by `classify_whatsapp_cloud_event`.
 KIND_MESSAGE = "message"
 KIND_STATUS = "status"
 KIND_MEDIA_ONLY = "media_only"
 KIND_MALFORMED = "malformed"
+
+# WhatsApp Cloud API message `type`s that carry a media object with an `id`
+# field (Graph API media id, used by `WhatsAppCloudClient.download_media`) —
+# see https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/payload-examples.
+_MEDIA_TYPES = ("image", "audio", "video", "document", "sticker")
 
 
 def _extract_text(message: Dict[str, Any]) -> str:
@@ -35,6 +40,33 @@ def _extract_text(message: Dict[str, Any]) -> str:
         return ""
     body = (message.get("text") or {}).get("body")
     return str(body).strip() if body else ""
+
+
+def _extract_media(message: Dict[str, Any]) -> MediaRef | None:
+    """Return the `MediaRef` for a media message, or `None` for a text one.
+
+    `conversation-history-media-storage`: previously mídia era descartada
+    inteiramente (evento classificado `KIND_MEDIA_ONLY` produzia
+    `data=None`) — agora essa referência é o que permite baixar e persistir
+    o binário em `whatbot/main.py`.
+    """
+    if not isinstance(message, dict):
+        return None
+    tipo = message.get("type")
+    if tipo not in _MEDIA_TYPES:
+        return None
+    media_obj = message.get(tipo)
+    if not isinstance(media_obj, dict):
+        return None
+    media_id = media_obj.get("id")
+    if not media_id:
+        return None
+    return MediaRef(
+        tipo=tipo,
+        provider_media_id=str(media_id),
+        mime_type=media_obj.get("mime_type"),
+        caption=media_obj.get("caption"),
+    )
 
 
 def _display_name(value: Dict[str, Any], sender_id: str) -> Optional[str]:
@@ -92,14 +124,51 @@ def parse_whatsapp_cloud_message(
     }
 
 
+def parse_whatsapp_cloud_media_message(
+    value: Dict[str, Any],
+    event: Dict[str, Any],
+    payload: Dict[str, Any] | None = None,
+) -> Optional[Dict[str, Any]]:
+    """Parse a single media-only event (`KIND_MEDIA_ONLY`), or `None` if it
+    is not one.
+
+    Mirrors `parse_whatsapp_cloud_message` — same normalized shape
+    (`InboundMessage.to_payload()`), except `text` is empty and `media`
+    carries the provider's media reference for later download
+    (`whatbot/main.py`, `WhatsAppCloudClient.download_media`).
+    """
+    if classify_whatsapp_cloud_event(event) != KIND_MEDIA_ONLY:
+        return None
+    media = _extract_media(event)
+    if media is None:
+        return None
+
+    sender_id = event["from"]
+    inbound = InboundMessage(
+        canal=WHATSAPP,
+        external_id=sender_id,
+        text="",
+        display_name=_display_name(value, sender_id),
+        message_id=event.get("id"),
+        raw=payload,
+        media=media,
+    )
+    return {
+        **inbound.to_payload(),
+        "timestamp": event.get("timestamp"),
+    }
+
+
 def parse_whatsapp_cloud_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Parse a full WhatsApp Cloud API webhook POST into classified events.
 
     A single POST can bundle multiple `entry`/`changes` items; every one is
     processed — none is dropped silently. Each result is
     `{"kind": ..., "data": ...}`: `data` is the parsed payload for `message`
-    events, `None` for every other kind (status, media_only, malformed)
-    since there is nothing to act on beyond the classification itself.
+    and `media_only` events (the latter carrying a `media` reference instead
+    of text — see `parse_whatsapp_cloud_media_message`), `None` for `status`
+    and `malformed` events, since there is nothing to act on beyond the
+    classification itself.
     """
     results: List[Dict[str, Any]] = []
     if not isinstance(payload, dict) or payload.get("object") != "whatsapp_business_account":
@@ -127,5 +196,7 @@ def parse_whatsapp_cloud_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]
                 data: Optional[Dict[str, Any]] = None
                 if kind == KIND_MESSAGE:
                     data = parse_whatsapp_cloud_message(value, event, payload)
+                elif kind == KIND_MEDIA_ONLY:
+                    data = parse_whatsapp_cloud_media_message(value, event, payload)
                 results.append({"kind": kind, "data": data})
     return results

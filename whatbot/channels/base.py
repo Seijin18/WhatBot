@@ -72,6 +72,23 @@ def channel_label(canal: str | None) -> str:
 
 
 @dataclass
+class MediaRef(object):
+    """Reference to media attached to an inbound message, not yet downloaded.
+
+    Carries only what the webhook payload already has — the provider's own
+    media id, used later to fetch the binary (see
+    `WhatsAppCloudClient.download_media`) and mime type/caption when present.
+    `conversation-history-media-storage` is what turns this into a stored
+    file (`media_arquivos` row) — this dataclass itself does no I/O.
+    """
+
+    tipo: str  # image | audio | video | document | sticker
+    provider_media_id: str
+    mime_type: str | None = None
+    caption: str | None = None
+
+
+@dataclass
 class InboundMessage:
     """A message received from any channel, already normalized.
 
@@ -86,6 +103,9 @@ class InboundMessage:
     message_id: str | None = None
     is_echo: bool = False
     raw: Dict[str, Any] | None = None
+    # `None` for every channel/message that carries no media — only
+    # WhatsApp Cloud API populates it today (see `whatsapp_cloud_webhook.py`).
+    media: "MediaRef | None" = None
 
     def to_payload(self) -> Dict[str, Any]:
         """Legacy whatbot payload shape, kept for `whatbot.main.main()`."""
@@ -99,6 +119,13 @@ class InboundMessage:
         }
         if canal == WHATSAPP:
             payload["from_number"] = self.external_id
+        if self.media is not None:
+            payload["media"] = {
+                "tipo": self.media.tipo,
+                "provider_media_id": self.media.provider_media_id,
+                "mime_type": self.media.mime_type,
+                "caption": self.media.caption,
+            }
         return payload
 
 

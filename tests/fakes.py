@@ -57,6 +57,11 @@ class FakeClient:
         # lets tests simulate a channel-level refusal (e.g. `ChannelError`
         # with `cause="window_expired"`) without a real client.
         self.raise_error: Exception | None = None
+        # conversation-history-media-storage: `None` by default (most
+        # clients/tests never touch media) — a test opts in by assigning a
+        # callable `(media_id) -> (bytes, mime_type)` here, or one that
+        # raises to simulate a download failure.
+        self.download_media = None
 
     def send_text(
         self,
@@ -193,6 +198,9 @@ class FakeDatabase:
         # Mirrors `disparo_mensagens` (campaign-csv-broadcast).
         self.campaign_messages: Dict[int, dict] = {}
         self._next_campaign_message_id = 1
+        # Mirrors `media_arquivos` (conversation-history-media-storage).
+        self.media_files: Dict[int, dict] = {}
+        self._next_media_id = 1
 
     # -- infra -----------------------------------------------------------
 
@@ -571,7 +579,25 @@ class FakeDatabase:
 
     # -- messages --------------------------------------------------------
 
-    def save_message(self, contact_id: int, direction: str, text: str) -> None:
+    def save_message(
+        self,
+        contact_id: int,
+        direction: str,
+        text: str,
+        *,
+        canal: str | None = None,
+        message_id: str | None = None,
+        payload: dict | None = None,
+        media_id: int | None = None,
+    ) -> None:
+        # Mirrors the real `mensagens_canal_message_id_idx` partial unique
+        # index (`whatbot/db.py::ensure_schema()`): a re-delivered
+        # `(canal, message_id)` is a silent no-op, not a duplicate row.
+        if message_id is not None and any(
+            m.get("canal") == canal and m.get("message_id") == message_id
+            for m in self.messages
+        ):
+            return
         self.messages.append(
             {
                 "id": self._next_message_id,
@@ -579,25 +605,113 @@ class FakeDatabase:
                 "direction": direction,
                 "text": text,
                 "created_at": _now(),
+                "canal": canal,
+                "message_id": message_id,
+                "payload": payload,
+                "media_id": media_id,
             }
         )
         self._next_message_id += 1
+
+    def _row_to_fake_message(self, m: dict) -> MessageRecord:
+        return MessageRecord(
+            id=m["id"],
+            contact_id=m["contact_id"],
+            direction=m["direction"],
+            text=m["text"],
+            created_at=m["created_at"],
+            canal=m.get("canal"),
+            message_id=m.get("message_id"),
+            payload=m.get("payload"),
+            media_id=m.get("media_id"),
+        )
 
     def get_recent_messages(
         self, contact_id: int, limit: int = 10
     ) -> List[MessageRecord]:
         rows = [m for m in self.messages if m["contact_id"] == contact_id]
         rows.sort(key=lambda m: (m["created_at"], m["id"]), reverse=True)
-        return [
-            MessageRecord(
-                id=m["id"],
-                contact_id=m["contact_id"],
-                direction=m["direction"],
-                text=m["text"],
-                created_at=m["created_at"],
+        return [self._row_to_fake_message(m) for m in rows[:limit]]
+
+    def get_conversation(
+        self, contact_id: int, *, limit: int = 50, before: int | None = None
+    ) -> List[MessageRecord]:
+        rows = [m for m in self.messages if m["contact_id"] == contact_id]
+        if before is not None:
+            rows = [m for m in rows if m["id"] < before]
+        rows.sort(key=lambda m: (m["created_at"], m["id"]), reverse=True)
+        return [self._row_to_fake_message(m) for m in rows[:limit]]
+
+    # -- media_arquivos (conversation-history-media-storage) -------------
+
+    def insert_media_file(
+        self,
+        *,
+        contact_id: int | None,
+        canal: str,
+        tipo: str,
+        storage_key: str,
+        status: str = "baixado",
+        mime_type: str | None = None,
+        tamanho_bytes: int | None = None,
+        storage_backend: str = "local",
+        origem_media_id: str | None = None,
+        erro: str | None = None,
+    ) -> int:
+        media_id = self._next_media_id
+        self._next_media_id += 1
+        self.media_files[media_id] = {
+            "id": media_id,
+            "contact_id": contact_id,
+            "canal": canal,
+            "tipo": tipo,
+            "mime_type": mime_type,
+            "tamanho_bytes": tamanho_bytes,
+            "storage_backend": storage_backend,
+            "storage_key": storage_key,
+            "origem_media_id": origem_media_id,
+            "status": status,
+            "erro": erro,
+            "created_at": _now(),
+        }
+        return media_id
+
+    def get_media_file(self, media_id: int):
+        from whatbot.db import MediaFile
+
+        row = self.media_files.get(media_id)
+        if row is None:
+            return None
+        return MediaFile(**row)
+
+    def get_contact_by_id(self, contact_id: int) -> Optional[Contact]:
+        row = self.contacts.get(contact_id)
+        return self._row_to_contact(row) if row else None
+
+    def list_conversations(self, *, limit: int = 50) -> List[dict]:
+        by_contact: dict[int, dict] = {}
+        for m in sorted(self.messages, key=lambda m: (m["created_at"], m["id"])):
+            by_contact[m["contact_id"]] = m
+        conversas = []
+        for contact_id, last in by_contact.items():
+            contact = self.get_contact_by_id(contact_id)
+            if contact is None:
+                continue
+            conversas.append(
+                {
+                    "contact_id": contact_id,
+                    "canal": contact.canal,
+                    "external_id": contact.external_id,
+                    "label": contact.label,
+                    "status": contact.status,
+                    "ia_ativa": contact.ia_ativa,
+                    "ultima_mensagem": last["text"],
+                    "ultima_direcao": last["direction"],
+                    "ultima_mensagem_em": last["created_at"],
+                }
             )
-            for m in rows[:limit]
-        ]
+        conversas.sort(key=lambda c: c["ultima_mensagem_em"], reverse=True)
+        return conversas[:limit]
 
     # -- admin sessions --------------------------------------------------
 

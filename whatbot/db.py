@@ -111,6 +111,34 @@ class MessageRecord:
     direction: str
     text: str
     created_at: datetime
+    canal: str | None = None
+    message_id: str | None = None
+    payload: dict[str, Any] | None = None
+    media_id: int | None = None
+
+
+@dataclass
+class MediaFile:
+    """Row of `media_arquivos` (see `ensure_schema()`,
+    conversation-history-media-storage)."""
+
+    id: int
+    contact_id: int | None
+    canal: str
+    tipo: str
+    mime_type: str | None
+    tamanho_bytes: int | None
+    storage_backend: str
+    storage_key: str
+    origem_media_id: str | None
+    status: str
+    erro: str | None
+    created_at: datetime
+
+
+# Closed set of `media_arquivos.status` values — Python-validated, same
+# style as `CONTACT_STATUSES` (no DB `CHECK`).
+MEDIA_STATUSES = {"baixado", "pendente", "falhou"}
 
 
 @dataclass
@@ -191,6 +219,36 @@ class Database:
             text TEXT NOT NULL,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
         );
+        -- conversation-history-media-storage: payload bruto por mensagem +
+        -- mídia recebida (ver design.md Decisão 1/2). Aditivo, colunas
+        -- opcionais — as 7 chamadas existentes de save_message() continuam
+        -- funcionando sem informar canal/message_id/payload/media_id.
+        CREATE TABLE IF NOT EXISTS media_arquivos (
+            id SERIAL PRIMARY KEY,
+            contact_id INTEGER REFERENCES contatos(id) ON DELETE CASCADE,
+            canal VARCHAR(32) NOT NULL,
+            tipo VARCHAR(16) NOT NULL,
+            mime_type VARCHAR(128),
+            tamanho_bytes BIGINT,
+            storage_backend VARCHAR(16) NOT NULL DEFAULT 'local',
+            storage_key TEXT NOT NULL,
+            origem_media_id VARCHAR(128),
+            status VARCHAR(16) NOT NULL DEFAULT 'baixado',
+            erro TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS media_arquivos_contact_idx
+            ON media_arquivos (contact_id, created_at DESC);
+        ALTER TABLE mensagens ADD COLUMN IF NOT EXISTS canal VARCHAR(32);
+        ALTER TABLE mensagens ADD COLUMN IF NOT EXISTS message_id VARCHAR(128);
+        ALTER TABLE mensagens ADD COLUMN IF NOT EXISTS payload JSONB;
+        ALTER TABLE mensagens ADD COLUMN IF NOT EXISTS media_id INTEGER
+            REFERENCES media_arquivos(id);
+        UPDATE mensagens SET canal = 'whatsapp' WHERE canal IS NULL;
+        CREATE INDEX IF NOT EXISTS mensagens_contact_created_idx
+            ON mensagens (contact_id, created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS mensagens_canal_message_id_idx
+            ON mensagens (canal, message_id) WHERE message_id IS NOT NULL;
         CREATE TABLE IF NOT EXISTS notificacao_admin (
             id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
             pendentes_desde_ultimo_lote INTEGER NOT NULL DEFAULT 0,
@@ -998,18 +1056,83 @@ class Database:
                 )
                 return [self._row_to_waiting(r) for r in cur.fetchall()]
 
-    def save_message(self, contact_id: int, direction: str, text: str) -> None:
+    def save_message(
+        self,
+        contact_id: int,
+        direction: str,
+        text: str,
+        *,
+        canal: str | None = None,
+        message_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+        media_id: int | None = None,
+    ) -> None:
+        """Persist one message. `canal`/`message_id`/`payload`/`media_id`
+        são todos opcionais (conversation-history-media-storage) — chamadas
+        que não têm o payload bruto do canal (ex.: `whatbot/admin.py`)
+        continuam funcionando sem informá-los.
+
+        `message_id` tem um índice único parcial por `canal` (ver
+        `ensure_schema()`) — uma reentrega do mesmo evento de webhook não
+        duplica a linha; nesse caso a inserção é um no-op silencioso.
+        """
         self.init_pool()
         try:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "INSERT INTO mensagens (contact_id, direction, text) VALUES (%s, %s, %s)",
-                        (contact_id, direction, text),
+                        """
+                        INSERT INTO mensagens
+                            (contact_id, direction, text, canal, message_id, payload, media_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (canal, message_id) WHERE message_id IS NOT NULL
+                        DO NOTHING
+                        """,
+                        (
+                            contact_id,
+                            direction,
+                            text,
+                            canal,
+                            message_id,
+                            json.dumps(payload) if payload is not None else None,
+                            media_id,
+                        ),
                     )
         except Exception as e:
             self._logger.exception("Erro salvando mensagem: %s", e)
             raise
+
+    @staticmethod
+    def _parse_jsonb(raw: Any) -> dict[str, Any] | None:
+        """Same normalization as `_parse_session_state`, but preserves `None`
+        (a message legitimately has no payload) instead of defaulting to `{}`."""
+        if raw is None:
+            return None
+        if isinstance(raw, dict):
+            return raw
+        try:
+            return json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return None
+
+    _MESSAGE_SELECT = """
+        SELECT id, contact_id, direction, text, created_at,
+               canal, message_id, payload, media_id
+        FROM mensagens
+    """
+
+    def _row_to_message(self, r) -> MessageRecord:
+        return MessageRecord(
+            id=r[0],
+            contact_id=r[1],
+            direction=r[2],
+            text=r[3],
+            created_at=r[4],
+            canal=r[5] if len(r) > 5 else None,
+            message_id=r[6] if len(r) > 6 else None,
+            payload=self._parse_jsonb(r[7]) if len(r) > 7 else None,
+            media_id=r[8] if len(r) > 8 else None,
+        )
 
     def get_recent_messages(
         self, contact_id: int, limit: int = 10
@@ -1019,23 +1142,210 @@ class Database:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT id, contact_id, direction, text, created_at FROM mensagens WHERE contact_id = %s ORDER BY created_at DESC LIMIT %s",
+                        f"{self._MESSAGE_SELECT} WHERE contact_id = %s "
+                        "ORDER BY created_at DESC LIMIT %s",
                         (contact_id, limit),
                     )
                     rows = cur.fetchall()
                     return [
-                        MessageRecord(
-                            id=r[0],
-                            contact_id=r[1],
-                            direction=r[2],
-                            text=r[3],
-                            created_at=r[4],
-                        )
+                        self._row_to_message(r)
                         for r in rows
                     ]
         except Exception as e:
             self._logger.exception("Erro carregando histórico: %s", e)
             raise
+
+    def get_conversation(
+        self,
+        contact_id: int,
+        *,
+        limit: int = 50,
+        before: int | None = None,
+    ) -> List[MessageRecord]:
+        """Histórico paginado por cursor (Requirement "Histórico paginado
+        por conversa", `message-history`).
+
+        Sempre em ordem cronológica reversa (mais recente primeiro).
+        `before` é o `id` da última mensagem já vista pelo chamador — a
+        próxima página busca só mensagens mais antigas que ela, evitando
+        repetir ou pular linhas mesmo se novas mensagens chegarem entre as
+        chamadas (diferente de paginar por offset, que uma inserção
+        concorrente pode desalinhar).
+        """
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    if before is not None:
+                        cur.execute(
+                            f"{self._MESSAGE_SELECT} WHERE contact_id = %s AND id < %s "
+                            "ORDER BY created_at DESC, id DESC LIMIT %s",
+                            (contact_id, before, limit),
+                        )
+                    else:
+                        cur.execute(
+                            f"{self._MESSAGE_SELECT} WHERE contact_id = %s "
+                            "ORDER BY created_at DESC, id DESC LIMIT %s",
+                            (contact_id, limit),
+                        )
+                    rows = cur.fetchall()
+                    return [self._row_to_message(r) for r in rows]
+        except Exception as e:
+            self._logger.exception("Erro carregando conversa: %s", e)
+            raise
+
+    # -- media_arquivos (conversation-history-media-storage) ----------------
+
+    _MEDIA_SELECT = """
+        SELECT id, contact_id, canal, tipo, mime_type, tamanho_bytes,
+               storage_backend, storage_key, origem_media_id, status, erro,
+               created_at
+        FROM media_arquivos
+    """
+
+    def _row_to_media_file(self, r) -> MediaFile:
+        return MediaFile(
+            id=r[0],
+            contact_id=r[1],
+            canal=r[2],
+            tipo=r[3],
+            mime_type=r[4],
+            tamanho_bytes=r[5],
+            storage_backend=r[6],
+            storage_key=r[7],
+            origem_media_id=r[8],
+            status=r[9],
+            erro=r[10],
+            created_at=r[11],
+        )
+
+    def insert_media_file(
+        self,
+        *,
+        contact_id: int | None,
+        canal: str,
+        tipo: str,
+        storage_key: str,
+        status: str = "baixado",
+        mime_type: str | None = None,
+        tamanho_bytes: int | None = None,
+        storage_backend: str = "local",
+        origem_media_id: str | None = None,
+        erro: str | None = None,
+    ) -> int:
+        """Insere uma linha em `media_arquivos` e devolve seu `id`.
+
+        `status` DEVE ser um de `MEDIA_STATUSES` — validado em Python, sem
+        `CHECK` de banco (mesmo padrão de `CONTACT_STATUSES`).
+        """
+        if status not in MEDIA_STATUSES:
+            raise ValueError(
+                f"status de mídia inválido: {status!r} (esperado um de {sorted(MEDIA_STATUSES)})"
+            )
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO media_arquivos
+                            (contact_id, canal, tipo, mime_type, tamanho_bytes,
+                             storage_backend, storage_key, origem_media_id, status, erro)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                        """,
+                        (
+                            contact_id,
+                            canal,
+                            tipo,
+                            mime_type,
+                            tamanho_bytes,
+                            storage_backend,
+                            storage_key,
+                            origem_media_id,
+                            status,
+                            erro,
+                        ),
+                    )
+                    row = cur.fetchone()
+                    return row[0]
+        except Exception as e:
+            self._logger.exception("Erro inserindo arquivo de mídia: %s", e)
+            raise
+
+    def get_media_file(self, media_id: int) -> Optional[MediaFile]:
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"{self._MEDIA_SELECT} WHERE id = %s", (media_id,)
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return None
+                    return self._row_to_media_file(row)
+        except Exception as e:
+            self._logger.exception("Erro buscando arquivo de mídia: %s", e)
+            raise
+
+    def get_contact_by_id(self, contact_id: int) -> Optional[Contact]:
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"{self._CONTACT_SELECT} WHERE id = %s", (contact_id,)
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return None
+                    return self._row_to_contact(row)
+        except Exception as e:
+            self._logger.exception("Erro buscando contato por id: %s", e)
+            raise
+
+    def list_conversations(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Lista contatos com a última mensagem (preview) para a tela de
+        conversas (Requirement "Histórico paginado por conversa",
+        `message-history`). Um contato sem nenhuma mensagem em `mensagens`
+        não aparece — não há conversa para mostrar.
+        """
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT ON (c.id)
+                            c.id, c.canal, c.external_id, c.push_name, c.handle,
+                            c.phone, c.status, c.ia_ativa,
+                            m.text, m.direction, m.created_at
+                        FROM contatos c
+                        JOIN mensagens m ON m.contact_id = c.id
+                        ORDER BY c.id, m.created_at DESC, m.id DESC
+                        """
+                    )
+                    rows = cur.fetchall()
+        except Exception as e:
+            self._logger.exception("Erro listando conversas: %s", e)
+            raise
+        conversas = [
+            {
+                "contact_id": r[0],
+                "canal": r[1],
+                "external_id": r[2],
+                "label": resolve_label(r[3], r[4], r[2] or r[5]),
+                "status": r[6],
+                "ia_ativa": r[7],
+                "ultima_mensagem": r[8],
+                "ultima_direcao": r[9],
+                "ultima_mensagem_em": r[10],
+            }
+            for r in rows
+        ]
+        conversas.sort(key=lambda c: c["ultima_mensagem_em"], reverse=True)
+        return conversas[:limit]
 
     def process_auto_reactivations(self) -> list[str]:
         """Re-enable bot for contacts past scheduled resume time.

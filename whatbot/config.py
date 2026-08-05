@@ -412,6 +412,36 @@ def ig_alert_silence_minutes() -> int:
         return DEFAULT_IG_ALERT_SILENCE_MINUTES
 
 
+# conversation-history-media-storage: só `local` está implementado nesta
+# etapa (ver `whatbot/storage/factory.py`); `MEDIA_STORAGE_ROOT` é relativo
+# ao diretório de trabalho do processo quando não é um path absoluto.
+ENV_MEDIA_STORAGE_BACKEND = "MEDIA_STORAGE_BACKEND"
+ENV_MEDIA_STORAGE_ROOT = "MEDIA_STORAGE_ROOT"
+DEFAULT_MEDIA_STORAGE_BACKEND = "local"
+DEFAULT_MEDIA_STORAGE_ROOT = "./data/media"
+
+
+def get_media_storage_backend() -> str:
+    return os.getenv(ENV_MEDIA_STORAGE_BACKEND, DEFAULT_MEDIA_STORAGE_BACKEND)
+
+
+def get_media_storage_root() -> str:
+    return os.getenv(ENV_MEDIA_STORAGE_ROOT, DEFAULT_MEDIA_STORAGE_ROOT)
+
+
+# Bearer token simples de servidor-para-servidor para as rotas /admin/* de
+# `whatbot/ingress.py` (histórico de conversas para o painel externo
+# camu-web-admin) — ver design.md Decisão 4. Sem valor default: uma rota
+# `/admin/*` sem token configurado deve recusar tudo, nunca aceitar por
+# omissão (mesmo critério de `ENV_IG_WEBHOOK_VERIFY_TOKEN`).
+ENV_ADMIN_API_TOKEN = "ADMIN_API_TOKEN"
+
+
+def get_admin_api_token() -> str | None:
+    raw = os.getenv(ENV_ADMIN_API_TOKEN, "").strip()
+    return raw or None
+
+
 PLACEHOLDER_VALUES = {
     "",
     "your_evolution_api_key",

@@ -17,6 +17,7 @@ from whatbot.whatsapp_cloud_webhook import (
     KIND_MESSAGE,
     KIND_STATUS,
     classify_whatsapp_cloud_event,
+    parse_whatsapp_cloud_media_message,
     parse_whatsapp_cloud_message,
     parse_whatsapp_cloud_payload,
 )
@@ -120,6 +121,54 @@ class TestParseWhatsAppCloudMessage(unittest.TestCase):
         self.assertIsNone(parse_whatsapp_cloud_message(_value(), event))
 
 
+class TestParseWhatsAppCloudMediaMessage(unittest.TestCase):
+    """`parse_whatsapp_cloud_media_message` (conversation-history-media-storage):
+    antes, um evento `KIND_MEDIA_ONLY` não produzia nenhum `data` (mídia
+    inteiramente descartada) — agora produz o mesmo formato normalizado de
+    `parse_whatsapp_cloud_message`, com `media` no lugar de texto."""
+
+    def _media_event(self, tipo: str, **media_overrides):
+        media_obj = {"id": "MEDIA_ID", "mime_type": f"{tipo}/x"}
+        media_obj.update(media_overrides)
+        event = _event(type=tipo, **{tipo: media_obj})
+        del event["text"]
+        return event
+
+    def test_not_a_media_event_returns_none(self):
+        self.assertIsNone(parse_whatsapp_cloud_media_message(_value(), _event()))
+
+    def test_image_message_produces_media_reference(self):
+        event = self._media_event("image", caption="olha isso")
+        parsed = parse_whatsapp_cloud_media_message(_value(), event)
+
+        self.assertEqual(parsed["canal"], WHATSAPP)
+        self.assertEqual(parsed["external_id"], PHONE)
+        self.assertEqual(parsed["text"], "")
+        self.assertEqual(parsed["message_id"], event["id"])
+        self.assertEqual(
+            parsed["media"],
+            {
+                "tipo": "image",
+                "provider_media_id": "MEDIA_ID",
+                "mime_type": "image/x",
+                "caption": "olha isso",
+            },
+        )
+
+    def test_audio_video_document_sticker_all_produce_media_reference(self):
+        for tipo in ("audio", "video", "document", "sticker"):
+            with self.subTest(tipo=tipo):
+                event = self._media_event(tipo)
+                parsed = parse_whatsapp_cloud_media_message(_value(), event)
+                self.assertEqual(parsed["media"]["tipo"], tipo)
+                self.assertEqual(parsed["media"]["provider_media_id"], "MEDIA_ID")
+
+    def test_media_object_without_id_is_not_a_media_message(self):
+        event = _event(type="image", image={"mime_type": "image/jpeg"})
+        del event["text"]
+        self.assertIsNone(parse_whatsapp_cloud_media_message(_value(), event))
+
+
 class TestParseWhatsAppCloudPayload(unittest.TestCase):
     def test_wrong_object_type_returns_no_events(self):
         payload = {"object": "page", "entry": []}
@@ -161,6 +210,10 @@ class TestParseWhatsAppCloudPayload(unittest.TestCase):
 
         self.assertEqual(len(results), 2)
         self.assertEqual([r["kind"] for r in results], [KIND_MESSAGE, KIND_MEDIA_ONLY])
+        # conversation-history-media-storage: o evento de mídia agora carrega
+        # `data` (referência de mídia), não mais `None`.
+        self.assertIsNotNone(results[1]["data"])
+        self.assertEqual(results[1]["data"]["media"]["provider_media_id"], "MEDIA_ID")
 
     def test_multiple_changes_and_entries_are_all_processed(self):
         payload = {

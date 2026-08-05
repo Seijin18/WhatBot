@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -42,6 +43,7 @@ ENV = {
     "ADMIN_NOTIFY_PHONES": "5511900000001",
     "TEST_MODE": "false",
     "GEMINI_API_KEY": "test-key",
+    "ADMIN_API_TOKEN": "test-admin-token",
 }
 
 
@@ -489,6 +491,207 @@ class TestWhatsAppWebhook(IngressTestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
         self.assertEqual(len(self.wa.sent), 1, "a reentrega não deve gerar um segundo envio")
+
+
+class TestAdminAuth(IngressTestCase):
+    """Requirement "API administrativa exige autenticação" (`message-history`)."""
+
+    def test_missing_token_is_rejected(self):
+        response = self.client.get("/admin/conversas")
+        self.assertEqual(response.status_code, 401)
+
+    def test_wrong_token_is_rejected(self):
+        response = self.client.get(
+            "/admin/conversas", headers={"Authorization": "Bearer wrong-token"}
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_unconfigured_token_fails_closed(self):
+        with patch.dict(os.environ, {"ADMIN_API_TOKEN": ""}, clear=False):
+            response = self.client.get(
+                "/admin/conversas",
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
+        self.assertEqual(response.status_code, 401)
+
+    def test_valid_token_is_accepted(self):
+        response = self.client.get(
+            "/admin/conversas",
+            headers={"Authorization": "Bearer test-admin-token"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+
+class TestAdminConversationRoutes(IngressTestCase):
+    """Requirement "Histórico paginado por conversa" (`message-history`)."""
+
+    def _auth(self):
+        return {"Authorization": "Bearer test-admin-token"}
+
+    def test_list_conversas_includes_last_message_preview(self):
+        contact = self.db.create_contact(
+            phone="5511999999999", canal=WHATSAPP, push_name="Maria"
+        )
+        self.db.save_message(contact.id, direction="in", text="oi")
+        self.db.save_message(contact.id, direction="out", text="olá!")
+
+        response = self.client.get("/admin/conversas", headers=self._auth())
+
+        self.assertEqual(response.status_code, 200)
+        conversas = response.json()["conversas"]
+        self.assertEqual(len(conversas), 1)
+        self.assertEqual(conversas[0]["contact_id"], contact.id)
+        self.assertEqual(conversas[0]["ultima_mensagem"], "olá!")
+
+    def test_conversation_history_returns_payload_and_media(self):
+        contact = self.db.create_contact(phone="5511999999999", canal=WHATSAPP)
+        media_id = self.db.insert_media_file(
+            contact_id=contact.id,
+            canal=WHATSAPP,
+            tipo="audio",
+            storage_key="whatsapp/2026/08/1/a.ogg",
+        )
+        self.db.save_message(
+            contact.id,
+            direction="in",
+            text="",
+            canal=WHATSAPP,
+            message_id="wamid.1",
+            payload={"raw": True},
+            media_id=media_id,
+        )
+
+        response = self.client.get(
+            f"/admin/conversas/{contact.id}/mensagens", headers=self._auth()
+        )
+
+        self.assertEqual(response.status_code, 200)
+        mensagens = response.json()["mensagens"]
+        self.assertEqual(len(mensagens), 1)
+        self.assertEqual(mensagens[0]["payload"], {"raw": True})
+        self.assertEqual(mensagens[0]["media_id"], media_id)
+
+    def test_pagination_cursor_does_not_repeat_messages(self):
+        contact = self.db.create_contact(phone="5511999999999", canal=WHATSAPP)
+        for i in range(5):
+            self.db.save_message(contact.id, direction="in", text=f"msg-{i}")
+
+        first_page = self.client.get(
+            f"/admin/conversas/{contact.id}/mensagens",
+            params={"limit": 2},
+            headers=self._auth(),
+        ).json()["mensagens"]
+        self.assertEqual(len(first_page), 2)
+
+        second_page = self.client.get(
+            f"/admin/conversas/{contact.id}/mensagens",
+            params={"limit": 2, "before": first_page[-1]["id"]},
+            headers=self._auth(),
+        ).json()["mensagens"]
+
+        ids_first = {m["id"] for m in first_page}
+        ids_second = {m["id"] for m in second_page}
+        self.assertEqual(ids_first & ids_second, set())
+
+
+class TestAdminMediaRoute(IngressTestCase):
+    """Requirement "Mídia recebida é baixada e referenciada" /
+    "Armazenamento local isolado por chave"."""
+
+    def test_streams_binary_via_storage_backend(self):
+        contact = self.db.create_contact(phone="5511999999999", canal=WHATSAPP)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {"MEDIA_STORAGE_ROOT": tmp, "MEDIA_STORAGE_BACKEND": "local"},
+                clear=False,
+            ):
+                from whatbot.storage import factory as storage_factory
+
+                storage_factory._cached_backend = None
+                storage_factory._cached_backend_key = None
+                # Não deixa o backend cacheado (process-wide) apontando para
+                # este diretório temporário depois que ele for removido —
+                # vazaria estado para testes seguintes que usem storage.
+                self.addCleanup(setattr, storage_factory, "_cached_backend", None)
+                self.addCleanup(setattr, storage_factory, "_cached_backend_key", None)
+                storage = storage_factory.get_storage_backend()
+                storage.save("whatsapp/1/a.ogg", b"audio bytes", "audio/ogg")
+
+                media_id = self.db.insert_media_file(
+                    contact_id=contact.id,
+                    canal=WHATSAPP,
+                    tipo="audio",
+                    mime_type="audio/ogg",
+                    storage_key="whatsapp/1/a.ogg",
+                )
+
+                response = self.client.get(
+                    f"/admin/midia/{media_id}",
+                    headers={"Authorization": "Bearer test-admin-token"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"audio bytes")
+        self.assertEqual(response.headers["content-type"], "audio/ogg")
+
+    def test_unknown_media_id_is_404(self):
+        response = self.client.get(
+            "/admin/midia/999999",
+            headers={"Authorization": "Bearer test-admin-token"},
+        )
+        self.assertEqual(response.status_code, 404)
+
+
+class TestAdminSendMessageRoute(IngressTestCase):
+    """Requirement "Envio humano reusa o roteador de canais"."""
+
+    def _auth(self):
+        return {"Authorization": "Bearer test-admin-token"}
+
+    def test_send_when_bot_active_is_refused(self):
+        contact = self.db.create_contact(
+            phone="5511999999999", canal=WHATSAPP, ia_ativa=True
+        )
+        response = self.client.post(
+            f"/admin/conversas/{contact.id}/mensagens",
+            json={"text": "oi"},
+            headers=self._auth(),
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.wa.sent, [])
+
+    def test_send_when_in_human_handover_goes_through_router(self):
+        contact = self.db.create_contact(
+            phone="5511999999999", canal=WHATSAPP, ia_ativa=False
+        )
+        response = self.client.post(
+            f"/admin/conversas/{contact.id}/mensagens",
+            json={"text": "já te respondo"},
+            headers=self._auth(),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.wa.sent), 1)
+        self.assertEqual(self.wa.sent[0]["text"], "já te respondo")
+
+    def test_unknown_contact_is_404(self):
+        response = self.client.post(
+            "/admin/conversas/999999/mensagens",
+            json={"text": "oi"},
+            headers=self._auth(),
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_empty_text_is_rejected(self):
+        contact = self.db.create_contact(
+            phone="5511999999999", canal=WHATSAPP, ia_ativa=False
+        )
+        response = self.client.post(
+            f"/admin/conversas/{contact.id}/mensagens",
+            json={"text": "   "},
+            headers=self._auth(),
+        )
+        self.assertEqual(response.status_code, 400)
 
 
 if __name__ == "__main__":

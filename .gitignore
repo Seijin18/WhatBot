@@ -30,6 +30,10 @@ logs/
 whatbot.log
 .whatbot-pid
 
+# conversation-history-media-storage: mídia baixada via LocalDiskStorage
+# (MEDIA_STORAGE_ROOT, default ./data/media) — dados de runtime, não versionado.
+/data/
+
 # IDE / OS
 .idea/
 .vscode/

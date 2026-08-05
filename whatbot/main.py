@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import csv
 import io
+import mimetypes
 import os
 import time
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any
 
@@ -20,6 +22,7 @@ from .config import (
     ENV_EVOLUTION_API_INSTANCE_NAME,
     WHATSAPP_PROVIDER_CLOUD,
     bootstrap_env,
+    get_media_storage_backend,
     is_placeholder,
     is_test_mode,
     resolve_db_dsn,
@@ -84,6 +87,7 @@ from .queue import (
     run_periodic_queue_checks,
 )
 from .message_log import log_inbound, log_llm_turn, log_outbound
+from .storage import get_storage_backend
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("whatbot")
@@ -155,6 +159,21 @@ def _register_whatsapp_cloud_client(router: ChannelRouter, db: Database) -> None
             phone_number_id=credential.account_id,
         )
     )
+
+
+def get_infra() -> tuple[Database, ChannelRouter]:
+    """Public accessor for the process-wide `Database`/`ChannelRouter`,
+    initializing them on first call.
+
+    `whatbot/ingress.py`'s `/admin/*` routes (conversation-history-media-storage)
+    need both without duplicating `_init_infra()`'s setup — `_db`/`_router`
+    themselves stay module-private (`main()` and every other entry point in
+    this module already reaches them directly, no reason to expose the
+    globals too).
+    """
+    _init_infra()
+    assert _db is not None and _router is not None
+    return _db, _router
 
 
 def _init_infra() -> None:
@@ -631,6 +650,8 @@ def process_customer_message(
     history_override: list | None = None,
     session_override: SessionState | None = None,
     order: Dict[str, Any] | None = None,
+    message_id: str | None = None,
+    raw_payload: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Handle an inbound customer message (or admin simulation).
 
@@ -645,6 +666,11 @@ def process_customer_message(
     `order` is the catalog order dict attached by
     `whatbot.webhook.parse_evolution_payload` (or `None`) — its presence
     forces an unconditional handover below (catalog-order-capture).
+
+    `message_id`/`raw_payload` (conversation-history-media-storage) are the
+    webhook's own message id and full raw payload, persisted alongside the
+    inbound message when the caller has them (`_dispatch_payload`); `None`
+    for callers without a real webhook payload (admin simulation).
     """
     canal = normalize_channel(canal)
     queue_check: Dict[str, Any] = {}
@@ -703,7 +729,14 @@ def process_customer_message(
             # Guarded by `not simulated`: a simulation must never leave a
             # trace in the real contact's message history.
             try:
-                _db.save_message(contact.id, direction="in", text=text)
+                _db.save_message(
+                    contact.id,
+                    direction="in",
+                    text=text,
+                    canal=canal,
+                    message_id=message_id,
+                    payload=raw_payload,
+                )
             except Exception:
                 logger.exception("Falha ao salvar mensagem na fila")
         return {
@@ -718,7 +751,14 @@ def process_customer_message(
         # Guarded by `not simulated`: a simulated conversation must never be
         # recorded in the real contact's message history.
         try:
-            _db.save_message(contact.id, direction="in", text=text)
+            _db.save_message(
+                contact.id,
+                direction="in",
+                text=text,
+                canal=canal,
+                message_id=message_id,
+                payload=raw_payload,
+            )
         except Exception:
             logger.exception("Falha ao salvar mensagem de entrada; prosseguindo")
 
@@ -1167,6 +1207,128 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     return _dispatch_payload(payload, original, canal)
 
 
+def _handle_media_message(
+    payload: Dict[str, Any],
+    original: Dict[str, Any],
+    canal: str,
+    phone: str,
+    push_name: str | None,
+    media: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Processa uma mensagem de mídia (sem texto): baixa o binário via o
+    client do canal, salva no `StorageBackend` configurado, registra em
+    `media_arquivos` e grava a mensagem em `mensagens` referenciando-a.
+
+    Requirements "Mídia recebida é baixada e referenciada" e "Falha de
+    download não bloqueia a mensagem" (`openspec/specs/message-history/`).
+    Não passa pelo pipeline de LLM/intenção — uma mensagem sem texto não tem
+    o que interpretar hoje (ver proposal.md, "Fora de escopo").
+    """
+    try:
+        contact = _db.get_contact_by_phone(phone, canal=canal)
+        if contact is None:
+            contact = _db.create_contact(
+                phone=phone,
+                status="novo_lead",
+                ia_ativa=True,
+                push_name=push_name,
+                canal=canal,
+            )
+            logger.info("Criado novo contato (mídia): %s", contact.label)
+        elif push_name:
+            _db.update_contact_push_name(contact.id, push_name)
+    except Exception as e:
+        logger.exception("Erro DB ao obter/criar contato para mídia: %s", e)
+        return {"ok": False, "error": "db_error", "detail": str(e)}
+
+    tipo = media.get("tipo") or "document"
+    provider_media_id = media.get("provider_media_id")
+    caption = media.get("caption") or ""
+    mime_type = media.get("mime_type")
+    data: bytes | None = None
+    status = "pendente"
+    erro: str | None = None
+
+    try:
+        client = _router.client_for(canal)
+        download = getattr(client, "download_media", None)
+        if download is None or not provider_media_id:
+            raise ChannelError(canal, "canal não suporta download de mídia")
+        data, downloaded_mime = download(provider_media_id)
+        mime_type = downloaded_mime or mime_type
+        status = "baixado"
+    except Exception as e:
+        # Falha de download não bloqueia a mensagem — ela ainda é registrada
+        # (ver `insert_media_file`/`save_message` abaixo), só sem o binário
+        # disponível ainda.
+        logger.exception("Falha ao baixar mídia %s: %s", provider_media_id, e)
+        erro = str(e)
+        status = "falhou"
+
+    ext = (mimetypes.guess_extension(mime_type) if mime_type else None) or ".bin"
+    today = datetime.now(timezone.utc)
+    storage_key = (
+        f"{canal}/{today.year:04d}/{today.month:02d}/{contact.id}/"
+        f"{uuid.uuid4().hex}{ext}"
+    )
+
+    if data is not None:
+        try:
+            get_storage_backend().save(storage_key, data, mime_type)
+        except Exception as e:
+            logger.exception("Falha ao salvar mídia em storage: %s", e)
+            status = "falhou"
+            erro = str(e)
+
+    try:
+        media_row_id = _db.insert_media_file(
+            contact_id=contact.id,
+            canal=canal,
+            tipo=tipo,
+            mime_type=mime_type,
+            tamanho_bytes=len(data) if data is not None else None,
+            storage_backend=get_media_storage_backend(),
+            storage_key=storage_key,
+            origem_media_id=provider_media_id,
+            status=status,
+            erro=erro,
+        )
+    except Exception as e:
+        logger.exception("Erro salvando registro de mídia: %s", e)
+        media_row_id = None
+
+    try:
+        _db.save_message(
+            contact.id,
+            direction="in",
+            text=caption,
+            canal=canal,
+            message_id=payload.get("message_id"),
+            payload=original,
+            media_id=media_row_id,
+        )
+    except Exception:
+        logger.exception("Falha ao salvar mensagem de mídia; prosseguindo")
+
+    log_inbound(
+        phone,
+        caption or f"[mídia:{tipo}]",
+        canal=canal,
+        push_name=push_name,
+        contact_id=contact.id,
+        source="customer",
+        contact_status=contact.status,
+        ia_ativa=contact.ia_ativa,
+    )
+
+    return {
+        "ok": True,
+        "media_only": True,
+        "media_status": status,
+        "media_id": media_row_id,
+    }
+
+
 def _dispatch_payload(
     payload: Dict[str, Any], original: Dict[str, Any], canal: str
 ) -> Dict[str, Any]:
@@ -1185,13 +1347,23 @@ def _dispatch_payload(
     text = (payload.get("text") or payload.get("message") or "").strip()
     push_name = payload.get("push_name")
     order = payload.get("order")
+    media = payload.get("media")
 
-    if not phone or not text:
+    if not phone or (not text and not media):
         if original.get("event"):
             logger.info("Evento Evolution ignorado: %s", original.get("event"))
             return {"ok": True, "ignored": True, "event": original.get("event")}
         logger.warning("Payload incompleto: phone/text ausentes")
         return {"ok": False, "error": "invalid_payload"}
+
+    # Mensagem de mídia sem texto (`whatsapp_cloud_webhook.py::KIND_MEDIA_ONLY`,
+    # conversation-history-media-storage): baixa/persiste e retorna sem
+    # passar pelo pipeline de LLM/intenção abaixo (nada a interpretar sem
+    # texto, ver `_handle_media_message`). Uma mídia com legenda ainda entra
+    # aqui — `text` só é preenchido pelos parsers de mensagem de texto, não
+    # pelos de mídia (`parse_whatsapp_cloud_media_message`).
+    if media and not text:
+        return _handle_media_message(payload, original, canal, phone, push_name, media)
 
     if canal == WHATSAPP and is_admin_phone(phone):
         admin_phone_norm = normalize_phone(phone)
@@ -1269,7 +1441,13 @@ def _dispatch_payload(
         return {"ok": True, "ignored": True, "reason": "test_mode"}
 
     return process_customer_message(
-        phone, text, push_name=push_name, canal=canal, order=order
+        phone,
+        text,
+        push_name=push_name,
+        canal=canal,
+        order=order,
+        message_id=payload.get("message_id"),
+        raw_payload=original,
     )
 
 

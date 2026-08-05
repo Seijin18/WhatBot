@@ -32,20 +32,23 @@ import logging
 import os
 from typing import Any, Dict, List
 
-from fastapi import BackgroundTasks, FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-from .channels import INSTAGRAM, WHATSAPP
+from .channels import ChannelError, INSTAGRAM, WHATSAPP, send_to_contact
 from .config import (
     ENV_IG_APP_SECRET,
     ENV_IG_WEBHOOK_VERIFY_TOKEN,
     ENV_WA_CLOUD_APP_SECRET,
     ENV_WA_CLOUD_WEBHOOK_VERIFY_TOKEN,
     bootstrap_env,
+    get_admin_api_token,
 )
 from .instagram_webhook import KIND_MESSAGE, parse_instagram_payload
-from .main import main as whatbot_main
+from .main import get_infra, main as whatbot_main
+from .storage import StorageError, get_storage_backend
 from .whatsapp_cloud_webhook import (
+    KIND_MEDIA_ONLY as WA_KIND_MEDIA_ONLY,
     KIND_MESSAGE as WA_KIND_MESSAGE,
     parse_whatsapp_cloud_payload,
 )
@@ -147,11 +150,15 @@ def _extract_message_events(body: bytes) -> List[Dict[str, Any]]:
 
 
 def _extract_whatsapp_message_events(body: bytes) -> List[Dict[str, Any]]:
-    """Parse the raw body and keep only customer-message events to process.
+    """Parse the raw body and keep customer-message and media events to process.
 
     `statuses` (delivery/read receipts) and malformed events are classified
     by `parse_whatsapp_cloud_payload` but have nothing for
     `whatbot.main.main()` to act on — see `whatbot/whatsapp_cloud_webhook.py`.
+    Media-only events (`KIND_MEDIA_ONLY`) *are* forwarded since
+    `conversation-history-media-storage`: previously they had no `data`
+    at all; now `whatbot.main._dispatch_payload` downloads and persists
+    them (see `_handle_media_message`).
     """
     try:
         payload = json.loads(body.decode("utf-8"))
@@ -159,7 +166,11 @@ def _extract_whatsapp_message_events(body: bytes) -> List[Dict[str, Any]]:
         logger.warning("Corpo do webhook do WhatsApp Cloud não é JSON válido")
         return []
     events = parse_whatsapp_cloud_payload(payload)
-    return [e["data"] for e in events if e["kind"] == WA_KIND_MESSAGE and e["data"]]
+    return [
+        e["data"]
+        for e in events
+        if e["kind"] in (WA_KIND_MESSAGE, WA_KIND_MEDIA_ONLY) and e["data"]
+    ]
 
 
 @app.get("/webhook/instagram")
@@ -230,6 +241,128 @@ async def receive_whatsapp_webhook(request: Request, background_tasks: Backgroun
         background_tasks.add_task(_process_event, event_payload)
 
     return JSONResponse({"ok": True, "queued": len(events)}, status_code=200)
+
+
+def _check_admin_auth(authorization: str | None) -> None:
+    """Bearer-token auth for `/admin/*` (Requirement "API administrativa
+    exige autenticação", `message-history`).
+
+    Deliberately simple (a single static token, no SSO/JWT) — see
+    `design.md` Decisão 4: the only consumer is one internal backend
+    (`camu-web-admin`, server-side). An unconfigured `ADMIN_API_TOKEN`
+    fails closed (401), same criterion as `verify_handshake` above for the
+    webhook token — never accept by omission.
+    """
+    expected = get_admin_api_token()
+    if not expected:
+        raise HTTPException(status_code=401, detail="ADMIN_API_TOKEN não configurado")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="token ausente")
+    token = authorization.split(" ", 1)[1]
+    if not hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="token inválido")
+
+
+@app.get("/admin/conversas")
+def list_conversas(authorization: str | None = Header(None)) -> Dict[str, Any]:
+    """Lista contatos com última mensagem/preview (Requirement "Histórico
+    paginado por conversa")."""
+    _check_admin_auth(authorization)
+    db, _router = get_infra()
+    return {"ok": True, "conversas": db.list_conversations()}
+
+
+@app.get("/admin/conversas/{contact_id}/mensagens")
+def get_conversa_mensagens(
+    contact_id: int,
+    before: int | None = None,
+    limit: int = 50,
+    authorization: str | None = Header(None),
+) -> Dict[str, Any]:
+    """Histórico paginado por cursor de uma conversa (Requirement "Histórico
+    paginado por conversa")."""
+    _check_admin_auth(authorization)
+    db, _router = get_infra()
+    mensagens = db.get_conversation(contact_id, limit=limit, before=before)
+    return {
+        "ok": True,
+        "mensagens": [
+            {
+                "id": m.id,
+                "direction": m.direction,
+                "text": m.text,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "canal": m.canal,
+                "message_id": m.message_id,
+                "payload": m.payload,
+                "media_id": m.media_id,
+            }
+            for m in mensagens
+        ],
+    }
+
+
+@app.get("/admin/midia/{media_id}")
+def get_midia(media_id: int, authorization: str | None = Header(None)) -> Response:
+    """Stream do binário de uma mídia salva (Requirement "Mídia recebida é
+    baixada e referenciada" / "Armazenamento local isolado por chave") —
+    nunca um path de disco exposto diretamente, sempre via `StorageBackend`.
+    """
+    _check_admin_auth(authorization)
+    db, _router = get_infra()
+    media_file = db.get_media_file(media_id)
+    if media_file is None:
+        raise HTTPException(status_code=404, detail="mídia não encontrada")
+    try:
+        data = get_storage_backend().open(media_file.storage_key)
+    except StorageError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return Response(
+        content=data, media_type=media_file.mime_type or "application/octet-stream"
+    )
+
+
+@app.post("/admin/conversas/{contact_id}/mensagens")
+async def enviar_mensagem_humana(
+    contact_id: int, request: Request, authorization: str | None = Header(None)
+) -> Dict[str, Any]:
+    """Envio de mensagem como atendente humano (Requirement "Envio humano
+    reusa o roteador de canais"): só aceito com o contato em atendimento
+    humano (`ia_ativa=False`, mesmo critério de `whatbot/main.py` linha
+    ~711), e sempre via `ChannelRouter`/`send_to_contact` — nunca um client
+    de canal concreto.
+    """
+    _check_admin_auth(authorization)
+    db, router = get_infra()
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="'text' é obrigatório")
+
+    contact = db.get_contact_by_id(contact_id)
+    if contact is None:
+        raise HTTPException(status_code=404, detail="contato não encontrado")
+    if contact.ia_ativa:
+        raise HTTPException(
+            status_code=409, detail="contato não está em atendimento humano"
+        )
+
+    destino = contact.external_id or contact.phone
+    try:
+        result = send_to_contact(
+            router,
+            destino,
+            text,
+            canal=contact.canal,
+            source="human_admin",
+            contact_id=contact.id,
+            human_agent=True,
+        )
+    except ChannelError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    db.save_message(contact.id, direction="out", text=text, canal=contact.canal)
+    return {"ok": True, "result": result}
 
 
 @app.get("/health")

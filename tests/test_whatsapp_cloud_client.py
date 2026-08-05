@@ -265,5 +265,79 @@ class TestFailure(unittest.TestCase):
         self.assertFalse(ctx.exception.retryable)
 
 
+class TestDownloadMedia(unittest.TestCase):
+    """`WhatsAppCloudClient.download_media` (conversation-history-media-storage):
+    dois passos da Graph API (metadados -> binário), sem tocar rede de
+    verdade."""
+
+    def setUp(self):
+        self.client = build_client()
+
+    def test_success_downloads_binary_and_mime_type(self):
+        meta_response = MagicMock(ok=True)
+        meta_response.json.return_value = {
+            "url": "https://graph.facebook.com/v25.0/MEDIA_ID/signed",
+            "mime_type": "audio/ogg",
+        }
+        binary_response = MagicMock(ok=True, content=b"binario-fake")
+
+        with patch(
+            "whatbot.channels.whatsapp_cloud.requests.get",
+            side_effect=[meta_response, binary_response],
+        ) as get_mock:
+            data, mime_type = self.client.download_media("MEDIA_ID")
+
+        self.assertEqual(data, b"binario-fake")
+        self.assertEqual(mime_type, "audio/ogg")
+        self.assertEqual(get_mock.call_count, 2)
+        # Second call hits the signed URL from the first response, not a
+        # hand-built URL.
+        self.assertEqual(
+            get_mock.call_args_list[1].args[0],
+            "https://graph.facebook.com/v25.0/MEDIA_ID/signed",
+        )
+
+    def test_metadata_request_failure_raises_channel_error(self):
+        meta_response = MagicMock(ok=False, status_code=404, text="not found")
+        with patch(
+            "whatbot.channels.whatsapp_cloud.requests.get", return_value=meta_response
+        ):
+            with self.assertRaises(ChannelError):
+                self.client.download_media("MEDIA_ID")
+
+    def test_metadata_response_without_url_raises_channel_error(self):
+        meta_response = MagicMock(ok=True)
+        meta_response.json.return_value = {"mime_type": "image/jpeg"}
+        with patch(
+            "whatbot.channels.whatsapp_cloud.requests.get", return_value=meta_response
+        ):
+            with self.assertRaises(ChannelError):
+                self.client.download_media("MEDIA_ID")
+
+    def test_binary_download_failure_raises_channel_error(self):
+        meta_response = MagicMock(ok=True)
+        meta_response.json.return_value = {
+            "url": "https://graph.facebook.com/signed",
+            "mime_type": "image/jpeg",
+        }
+        binary_response = MagicMock(ok=False, status_code=410, text="expired")
+        with patch(
+            "whatbot.channels.whatsapp_cloud.requests.get",
+            side_effect=[meta_response, binary_response],
+        ):
+            with self.assertRaises(ChannelError):
+                self.client.download_media("MEDIA_ID")
+
+    def test_network_error_raises_retryable_channel_error(self):
+        with patch(
+            "whatbot.channels.whatsapp_cloud.requests.get",
+            side_effect=requests.ConnectionError("sem rede"),
+        ):
+            with self.assertRaises(ChannelError) as ctx:
+                self.client.download_media("MEDIA_ID")
+
+        self.assertTrue(ctx.exception.retryable)
+
+
 if __name__ == "__main__":
     unittest.main()

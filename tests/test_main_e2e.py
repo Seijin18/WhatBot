@@ -1006,14 +1006,14 @@ class TestNoDuplicateSendWhenPostSendBookkeepingFails(MainE2ETestCase):
         original_save_message = self.db.save_message
         calls = {"n": 0}
 
-        def flaky_save_message(contact_id, direction, text):
+        def flaky_save_message(contact_id, direction, text, **kwargs):
             calls["n"] += 1
             # Let the inbound save (direction="in") succeed so the flow
             # reaches the real send; blow up only on the post-send bookkeeping
             # write (direction="out") of this first delivery.
             if direction == "out" and calls["n"] == 2:
                 raise RuntimeError("soneca de conexão do Postgres simulada")
-            return original_save_message(contact_id, direction, text)
+            return original_save_message(contact_id, direction, text, **kwargs)
 
         self.db.save_message = flaky_save_message
 
@@ -1056,7 +1056,7 @@ class TestNoDuplicateHandoverSendWhenPostSendBookkeepingFails(MainE2ETestCase):
         original_save_message = self.db.save_message
         calls = {"n": 0}
 
-        def flaky_save_message(contact_id, direction, text):
+        def flaky_save_message(contact_id, direction, text, **kwargs):
             calls["n"] += 1
             # Let the inbound save (direction="in") succeed so the flow
             # reaches the real send; blow up only on the post-send bookkeeping
@@ -1064,7 +1064,7 @@ class TestNoDuplicateHandoverSendWhenPostSendBookkeepingFails(MainE2ETestCase):
             # of this first delivery.
             if direction == "out" and calls["n"] == 2:
                 raise RuntimeError("soneca de conexão do Postgres simulada")
-            return original_save_message(contact_id, direction, text)
+            return original_save_message(contact_id, direction, text, **kwargs)
 
         self.db.save_message = flaky_save_message
 

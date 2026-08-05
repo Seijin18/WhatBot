@@ -217,6 +217,51 @@ class WhatsAppCloudClient:
         )
         return response.json()
 
+    def download_media(self, media_id: str) -> tuple[bytes, str | None]:
+        """Download a media binary previously referenced in an inbound webhook.
+
+        Two-step Graph API flow (there is no direct "GET the bytes" endpoint):
+        `GET /{media-id}` returns a short-lived signed `url` + `mime_type`,
+        then that `url` itself is fetched with the same bearer token — see
+        `openspec/changes/conversation-history-media-storage/design.md`.
+        Raises `ChannelError` on any transport/HTTP failure; callers
+        (`whatbot/main.py`) are expected to catch it and record a failed
+        download rather than let it interrupt message processing.
+        """
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+        meta_url = f"{self.base_url}/{API_VERSION}/{media_id}"
+        try:
+            meta_response = requests.get(meta_url, headers=headers, timeout=10)
+        except requests.RequestException as exc:
+            raise ChannelError(
+                WHATSAPP, f"erro consultando metadados de mídia: {exc}", retryable=_is_retryable(exc)
+            ) from exc
+        if not meta_response.ok:
+            raise ChannelError(
+                WHATSAPP,
+                f"Graph API {meta_response.status_code} ao consultar mídia {media_id}: "
+                f"{meta_response.text[:500]}",
+            )
+        meta = meta_response.json()
+        download_url = meta.get("url")
+        if not download_url:
+            raise ChannelError(WHATSAPP, f"resposta de metadados de mídia sem 'url': {meta}")
+        mime_type = meta.get("mime_type")
+
+        try:
+            binary_response = requests.get(download_url, headers=headers, timeout=30)
+        except requests.RequestException as exc:
+            raise ChannelError(
+                WHATSAPP, f"erro baixando binário de mídia: {exc}", retryable=_is_retryable(exc)
+            ) from exc
+        if not binary_response.ok:
+            raise ChannelError(
+                WHATSAPP,
+                f"Graph API {binary_response.status_code} ao baixar binário de mídia "
+                f"{media_id}",
+            )
+        return binary_response.content, mime_type
+
     def send_text(
         self,
         to: str,
