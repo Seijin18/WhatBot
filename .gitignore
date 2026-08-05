@@ -27,10 +27,13 @@ health_report.json
 instance_info.json
 qrcode.html
 logs/
+whatbot.log
+.whatbot-pid
 
 # IDE / OS
 .idea/
 .vscode/
+.cursor/
 *.swp
 .DS_Store
 Thumbs.db
