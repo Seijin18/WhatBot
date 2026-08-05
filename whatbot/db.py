@@ -47,6 +47,12 @@ CONTACT_STATUSES = {
 # Decisão 1).
 CONTACT_TIPO_CLIENTES = {"b2c", "b2b"}
 
+# Closed set of `disparo_mensagens.status` values (campaign-csv-broadcast).
+# Same style as `CONTACT_STATUSES`/`CONTACT_TIPO_CLIENTES` — no DB `CHECK`
+# constraint, transitions are enforced by the Python call sites
+# (`whatbot.main.send_campaign_queue`), not by the schema itself.
+CAMPAIGN_MESSAGE_STATUSES = {"pendente", "enviado", "falha", "pulado"}
+
 
 @dataclass
 class Contact:
@@ -121,6 +127,27 @@ class ChannelCredential:
     access_token: str
     expires_at: datetime | None
     refreshed_at: datetime | None
+
+
+@dataclass
+class CampaignMessage:
+    """Row of `disparo_mensagens` (see `ensure_schema()`, campaign-csv-broadcast).
+
+    One row per contact per imported batch (`lote`), enqueued by
+    `whatbot.main.import_campaign` and drained by
+    `whatbot.main.send_campaign_queue`.
+    """
+
+    id: int
+    lote: str
+    canal: str
+    external_id: str
+    mensagem: str
+    status: str
+    tentativas: int
+    erro: str | None
+    criado_em: datetime
+    enviado_em: datetime | None
 
 
 class Database:
@@ -259,6 +286,27 @@ class Database:
             disponivel BOOLEAN,
             last_synced_at TIMESTAMPTZ
         );
+        -- Disparo de mensagens em massa via CSV, com fila e limite de taxa
+        -- (campaign-csv-broadcast, ver design.md Decisão 1): fila persistida
+        -- no Postgres em vez de memória/fila externa, já que cada execução do
+        -- bot roda como um job Windmill novo (processo efêmero). Importação
+        -- síncrona (`import_campaign`) enfileira aqui; o worker agendado
+        -- (`send_campaign_queue`) drena respeitando `CAMPAIGN_BATCH_SIZE` e
+        -- `CAMPAIGN_SEND_INTERVAL_SECONDS` (design.md, Decisão 2).
+        CREATE TABLE IF NOT EXISTS disparo_mensagens (
+            id SERIAL PRIMARY KEY,
+            lote VARCHAR(128) NOT NULL,
+            canal VARCHAR(32) NOT NULL DEFAULT 'whatsapp',
+            external_id VARCHAR(64) NOT NULL,
+            mensagem TEXT NOT NULL,
+            status VARCHAR(16) NOT NULL DEFAULT 'pendente',
+            tentativas INTEGER NOT NULL DEFAULT 0,
+            erro TEXT,
+            criado_em TIMESTAMP WITH TIME ZONE DEFAULT now(),
+            enviado_em TIMESTAMP WITH TIME ZONE
+        );
+        CREATE INDEX IF NOT EXISTS disparo_mensagens_lote_status_idx
+            ON disparo_mensagens (lote, status);
         INSERT INTO notificacao_admin (id, pendentes_desde_ultimo_lote) VALUES (1, 0)
         ON CONFLICT (id) DO NOTHING;
         """
@@ -1396,4 +1444,159 @@ class Database:
                     ]
         except Exception as e:
             self._logger.exception("Erro resolvendo itens do catálogo: %s", e)
+            raise
+
+    # -- mass-broadcast campaign queue (campaign-csv-broadcast) -----------
+
+    _CAMPAIGN_MESSAGE_SELECT = """
+        SELECT id, lote, canal, external_id, mensagem, status,
+               tentativas, erro, criado_em, enviado_em
+        FROM disparo_mensagens
+    """
+
+    def _row_to_campaign_message(self, row) -> CampaignMessage:
+        return CampaignMessage(
+            id=row[0],
+            lote=row[1],
+            canal=row[2],
+            external_id=row[3],
+            mensagem=row[4],
+            status=row[5],
+            tentativas=row[6],
+            erro=row[7],
+            criado_em=row[8],
+            enviado_em=row[9],
+        )
+
+    def insert_campaign_message(
+        self, lote: str, canal: str, external_id: str, mensagem: str
+    ) -> int:
+        """Enqueue a single `pendente` row for `lote`. Called once per valid
+        CSV line by `whatbot.main.import_campaign`."""
+        canal = normalize_channel(canal)
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO disparo_mensagens (lote, canal, external_id, mensagem)
+                        VALUES (%s, %s, %s, %s)
+                        RETURNING id
+                        """,
+                        (lote, canal, external_id, mensagem),
+                    )
+                    return cur.fetchone()[0]
+        except Exception as e:
+            self._logger.exception("Erro inserindo mensagem de disparo: %s", e)
+            raise
+
+    def get_pending_campaign_messages(self, limit: int) -> list[CampaignMessage]:
+        """Up to `limit` `pendente` rows, oldest first — the batch a single
+        `send_campaign_queue` run processes (design.md, Decisão 2)."""
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        self._CAMPAIGN_MESSAGE_SELECT
+                        + " WHERE status = 'pendente' ORDER BY criado_em ASC LIMIT %s",
+                        (limit,),
+                    )
+                    return [self._row_to_campaign_message(r) for r in cur.fetchall()]
+        except Exception as e:
+            self._logger.exception("Erro buscando mensagens pendentes de disparo: %s", e)
+            raise
+
+    def mark_campaign_message_sent(self, message_id: int) -> None:
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE disparo_mensagens
+                        SET status = 'enviado', enviado_em = now()
+                        WHERE id = %s
+                        """,
+                        (message_id,),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro marcando mensagem de disparo como enviada: %s", e)
+            raise
+
+    def mark_campaign_message_retry(
+        self, message_id: int, tentativas: int, erro: str
+    ) -> None:
+        """Record a retryable failure: bump `tentativas`, keep `status =
+        'pendente'` for the next `send_campaign_queue` run."""
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE disparo_mensagens
+                        SET tentativas = %s, erro = %s
+                        WHERE id = %s
+                        """,
+                        (tentativas, erro, message_id),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro registrando nova tentativa de disparo: %s", e)
+            raise
+
+    def mark_campaign_message_failed(self, message_id: int, erro: str) -> None:
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE disparo_mensagens
+                        SET status = 'falha', erro = %s
+                        WHERE id = %s
+                        """,
+                        (erro, message_id),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro marcando mensagem de disparo como falha: %s", e)
+            raise
+
+    def mark_campaign_message_skipped(self, message_id: int) -> None:
+        """Contact has `ia_ativa = FALSE` at send time (design.md, Decisão 4)."""
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE disparo_mensagens SET status = 'pulado' WHERE id = %s",
+                        (message_id,),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro marcando mensagem de disparo como pulada: %s", e)
+            raise
+
+    def get_campaign_status(self, lote: str) -> dict:
+        """Count of rows per `status` for `lote` — feeds the admin
+        `campaign_status` command. Always includes every status in
+        `CAMPAIGN_MESSAGE_STATUSES`, zero-filled, even if `lote` has none."""
+        self.init_pool()
+        counts = {status: 0 for status in CAMPAIGN_MESSAGE_STATUSES}
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT status, COUNT(*) FROM disparo_mensagens
+                        WHERE lote = %s
+                        GROUP BY status
+                        """,
+                        (lote,),
+                    )
+                    for status, count in cur.fetchall():
+                        counts[status] = int(count)
+                    return counts
+        except Exception as e:
+            self._logger.exception("Erro buscando status do disparo: %s", e)
             raise

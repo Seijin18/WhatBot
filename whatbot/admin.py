@@ -110,6 +110,7 @@ Exemplos:
 • *Finalizei com a Maria* / *Atendi o 5511...*
 • *Libera o bot para o João* / *Bot pode voltar a falar com Maria*
 • *Marca a Maria como cliente ativo* / *Confirma venda da Maria*
+• *Como está o disparo <lote>?* / *Quantos faltam no <lote>?*
 
 Se houver *duas Marias*, o bot pergunta qual delas (responda *1*, *2* ou o telefone).
 
@@ -122,6 +123,26 @@ Se houver *duas Marias*, o bot pergunta qual delas (responda *1*, *2* ou o telef
 • Responder um cliente → sai da fila; bot reativa sozinho em *{AUTO_REACTIVATE_HOURS}h*
 • Alertas de fila continuam automáticos
 """
+
+
+def _format_campaign_status(lote: str, counts: dict) -> str:
+    """Portuguese status reply for the `campaign_status` admin command
+    (campaign-csv-broadcast) — `counts` is `Database.get_campaign_status`'s
+    return, zero-filled for every known status."""
+    pendente = counts.get("pendente", 0)
+    enviado = counts.get("enviado", 0)
+    falha = counts.get("falha", 0)
+    pulado = counts.get("pulado", 0)
+    total = pendente + enviado + falha + pulado
+    if total == 0:
+        return f"Não encontrei nenhuma mensagem para o disparo *{lote}*."
+    return (
+        f"📦 *Disparo {lote}* — {total} mensagem(ns)\n"
+        f"Pendente: {pendente}\n"
+        f"Enviado: {enviado}\n"
+        f"Falha: {falha}\n"
+        f"Pulado: {pulado}"
+    )
 
 
 def _reply(router, db, admin_phone: str, contact_id: int, text: str) -> dict:
@@ -555,6 +576,16 @@ def handle_admin_message(
     if intent.action == "summary":
         return _reply(
             router, db, admin_phone, contact_id, build_daily_summary(db)
+        )
+
+    if intent.action == "campaign_status" and intent.query:
+        counts = db.get_campaign_status(intent.query.strip())
+        return _reply(
+            router,
+            db,
+            admin_phone,
+            contact_id,
+            _format_campaign_status(intent.query.strip(), counts),
         )
 
     if intent.action == "complete_all":

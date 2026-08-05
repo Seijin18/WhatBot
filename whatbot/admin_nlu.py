@@ -14,6 +14,7 @@ IntentAction = Literal[
     "pause",
     "mark_active_client",
     "set_tipo_cliente",
+    "campaign_status",
     "summary",
     "help",
     "complete_all",
@@ -65,6 +66,23 @@ _PAUSE = re.compile(
 _SUMMARY = re.compile(r"\b(resumo|estat[ií]sticas|stats)\b", re.I)
 _HELP = re.compile(r"^(ajuda|help|\?)$", re.I)
 _COMPLETE_ALL = re.compile(r"\b(atender\s+todos|limpar\s+(?:a\s+)?fila)\b", re.I)
+
+# `campaign-csv-broadcast`: consulta de status de um lote de disparo em
+# massa importado via CSV (`whatbot.main.import_campaign`). Não resolve um
+# CONTATO como os demais comandos acima — o texto livre remanescente após o
+# gatilho é o identificador do `lote` (rótulo dado na importação), passado
+# direto para `Database.get_campaign_status`. Checado antes de `_SUMMARY`
+# por clareza — "status do disparo X" já não bateria em `_SUMMARY` de
+# qualquer forma (não contém nenhuma das palavras do gatilho), mas manter a
+# checagem isolada e explícita evita qualquer colisão futura entre os dois.
+_CAMPAIGN_STATUS = re.compile(
+    r"\bcomo\s+est[aá]\s+o\s+disparo\s+"
+    r"|\bstatus\s+do\s+disparo\s+"
+    r"|\bandamento\s+do\s+disparo\s+"
+    r"|\bquantos\s+faltam\s+no\s+"
+    r"|\bquantas\s+faltam\s+no\s+",
+    re.I,
+)
 
 # `contact-interest-memory`: manual confirmation that a contact became a
 # paying/active client (`contatos.status = "cliente_ativo"`) — the automatic
@@ -142,6 +160,10 @@ def parse_admin_intent(text: str) -> AdminIntent:
         return AdminIntent("help")
     if _COMPLETE_ALL.search(lower):
         return AdminIntent("complete_all")
+    if _CAMPAIGN_STATUS.search(lower):
+        query = _strip_intent_prefix(raw, _CAMPAIGN_STATUS)
+        query = query.strip(" ?.!")
+        return AdminIntent("campaign_status", query or raw)
     if _SUMMARY.search(lower):
         return AdminIntent("summary")
     if _LIST.search(lower):

@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import os
+import time
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Any
 
 from .config import (
     SYSTEM_PROMPTS,
+    CAMPAIGN_BATCH_SIZE,
+    CAMPAIGN_MAX_RETRIES,
+    CAMPAIGN_SEND_INTERVAL_SECONDS,
     ENV_DB_DSN,
     ENV_EVOLUTION_API_KEY,
     ENV_EVOLUTION_API_INSTANCE_NAME,
@@ -28,6 +34,7 @@ from .channels import (
     EvolutionApiClient,
     UnknownChannelError,
     normalize_channel,
+    send_to_contact,
     validate_channel,
 )
 from .channels.instagram import InstagramClient, instagram_last_inbound_lookup
@@ -356,6 +363,195 @@ def sync_catalog() -> Dict[str, Any]:
         )
         return {"ok": False, "error": "upsert_failed", "detail": str(e)}
     return {"ok": True, "synced": len(products)}
+
+
+def _normalize_campaign_phone(raw: str) -> str | None:
+    """Normalize a CSV `telefone` cell into a WhatsApp-shaped external id, or
+    `None` if it doesn't normalize into a plausible phone number.
+
+    Same digit-count bounds as `contact_resolver.extract_phone_from_text`
+    (10-15 digits, DDI+DDD+número) — `normalize_phone` alone only strips
+    non-digits, it does not reject something that is clearly not a phone
+    number (e.g. empty, or a handful of stray digits).
+    """
+    digits = normalize_phone(raw or "")
+    if 10 <= len(digits) <= 15:
+        return digits
+    return None
+
+
+def import_campaign(csv_content: str, lote: str) -> Dict[str, Any]:
+    """Synchronous Windmill job: import a mass-broadcast CSV
+    (campaign-csv-broadcast).
+
+    Parses `csv_content` with the standard-library `csv` module (columns
+    `telefone`/`mensagem` required, `tipo_cliente` optional) and enqueues one
+    `disparo_mensagens` row per valid line as `pendente` — the scheduled
+    `send_campaign_queue()` worker drains it later, at a controlled pace (see
+    design.md, Decisão 3: import and send are deliberately separate jobs).
+
+    An invalid line (telefone not normalizable, mensagem empty) is reported
+    in the returned `erros` list (line number + reason) without failing the
+    rest of the batch (Requirement "Importação valida linha a linha sem
+    falhar o lote inteiro"). `tipo_cliente`, when present and one of
+    `Database.CONTACT_TIPO_CLIENTES`, is applied best-effort to a contact
+    that already exists for that phone — never fails the line, whether the
+    contact doesn't exist yet or the value itself is invalid.
+    """
+    try:
+        _init_infra()
+    except Exception as e:
+        logger.exception("Erro inicializando infra: %s", e)
+        return {"ok": False, "error": "infra_init_failed", "detail": str(e)}
+
+    reader = csv.DictReader(io.StringIO(csv_content))
+    fieldnames = reader.fieldnames or []
+    if "telefone" not in fieldnames or "mensagem" not in fieldnames:
+        return {
+            "ok": False,
+            "error": "missing_columns",
+            "detail": "CSV precisa das colunas 'telefone' e 'mensagem'",
+        }
+
+    enfileiradas = 0
+    erros: list[dict] = []
+    # Header is line 1; `csv.DictReader` yields the first data row as line 2.
+    for line_number, row in enumerate(reader, start=2):
+        raw_phone = (row.get("telefone") or "").strip()
+        mensagem = (row.get("mensagem") or "").strip()
+        phone = _normalize_campaign_phone(raw_phone)
+        if phone is None:
+            erros.append({"linha": line_number, "motivo": "telefone inválido"})
+            continue
+        if not mensagem:
+            erros.append({"linha": line_number, "motivo": "mensagem vazia"})
+            continue
+
+        try:
+            _db.insert_campaign_message(lote, WHATSAPP, phone, mensagem)
+            enfileiradas += 1
+        except Exception as e:
+            logger.exception(
+                "Erro inserindo linha %s do CSV de campanha: %s", line_number, e
+            )
+            erros.append({"linha": line_number, "motivo": "erro ao gravar no banco"})
+            continue
+
+        tipo_cliente = (row.get("tipo_cliente") or "").strip().lower()
+        if tipo_cliente:
+            try:
+                contact = _db.get_contact_by_phone(phone, canal=WHATSAPP)
+                if contact is not None:
+                    _db.set_contact_tipo_cliente(contact.id, tipo_cliente)
+            except ValueError:
+                # tipo_cliente fora do conjunto válido (contact-segmentation-
+                # b2b-b2c): ignora só a coluna, a linha já foi enfileirada
+                # normalmente (tasks.md 2.4).
+                logger.warning(
+                    "tipo_cliente inválido na linha %s do CSV de campanha: %r",
+                    line_number,
+                    tipo_cliente,
+                )
+            except Exception:
+                logger.exception(
+                    "Falha ao atualizar tipo_cliente na linha %s do CSV de campanha",
+                    line_number,
+                )
+
+    return {"ok": True, "lote": lote, "enfileiradas": enfileiradas, "erros": erros}
+
+
+def send_campaign_queue() -> Dict[str, Any]:
+    """Scheduled Windmill job: send pending `disparo_mensagens` rows, rate
+    limited (campaign-csv-broadcast).
+
+    Pulls up to `CAMPAIGN_BATCH_SIZE` `pendente` rows, oldest first. A
+    contact with `ia_ativa = FALSE` at send time (handover in progress, or
+    manually paused) is skipped, never sent to (design.md, Decisão 4 — the
+    check happens here, at send time, not at import time). Delivery goes
+    through `whatbot/channels/router.py::send_to_contact` — the only
+    outbound boundary in the project (`openspec/project.md`, "Camadas").
+
+    Fail-closed on the `ia_ativa` check itself: if `get_contact_by_phone`
+    raises (e.g. a transient Postgres error), the row is neither sent nor
+    skipped — it stays `pendente` for the next run, `tentativas` untouched
+    (this is an infra failure, not a delivery attempt). Defaulting to "send
+    anyway" here would defeat the very point of Decisão 4 — a contact in
+    active handover or manually paused could receive a campaign message
+    exactly when the DB is too flaky to tell.
+
+    `ChannelError(retryable=True)` under `CAMPAIGN_MAX_RETRIES` bumps
+    `tentativas` and stays `pendente` for a future run; exhausted retries or
+    a non-retryable error mark the row `falha` (the latter without consuming
+    an extra attempt). `time.sleep(CAMPAIGN_SEND_INTERVAL_SECONDS)` paces
+    every processed row within this run (sent, skipped, or left pendente
+    after a lookup failure) — never after the last one.
+    """
+    try:
+        _init_infra()
+    except Exception as e:
+        logger.exception("Erro inicializando infra: %s", e)
+        return {"ok": False, "error": "infra_init_failed", "detail": str(e)}
+
+    messages = _db.get_pending_campaign_messages(CAMPAIGN_BATCH_SIZE)
+    counters = {"enviado": 0, "falha": 0, "pulado": 0, "pendente": 0}
+
+    for index, message in enumerate(messages):
+        lookup_failed = False
+        try:
+            contact = _db.get_contact_by_phone(message.external_id, canal=message.canal)
+        except Exception as e:
+            logger.exception(
+                "Erro buscando contato %s do disparo #%s; mantendo pendente sem "
+                "enviar (fail-closed — não dá para checar ia_ativa, ver "
+                "design.md Decisão 4)",
+                message.external_id,
+                message.id,
+            )
+            contact = None
+            lookup_failed = True
+            lookup_error = str(e)
+
+        if lookup_failed:
+            # Não conta como tentativa de envio: é falha de infraestrutura na
+            # checagem de ia_ativa, não uma tentativa de entrega que falhou.
+            _db.mark_campaign_message_retry(message.id, message.tentativas, lookup_error)
+            counters["pendente"] += 1
+        elif contact is not None and not contact.ia_ativa:
+            _db.mark_campaign_message_skipped(message.id)
+            counters["pulado"] += 1
+        else:
+            try:
+                send_to_contact(
+                    _router,
+                    message.external_id,
+                    message.mensagem,
+                    canal=message.canal,
+                    source="campaign",
+                    contact_id=contact.id if contact is not None else None,
+                )
+                _db.mark_campaign_message_sent(message.id)
+                counters["enviado"] += 1
+            except ChannelError as e:
+                if e.retryable and message.tentativas + 1 < CAMPAIGN_MAX_RETRIES:
+                    _db.mark_campaign_message_retry(
+                        message.id, message.tentativas + 1, str(e)
+                    )
+                    counters["pendente"] += 1
+                else:
+                    _db.mark_campaign_message_failed(message.id, str(e))
+                    counters["falha"] += 1
+            except Exception as e:
+                logger.exception(
+                    "Erro inesperado enviando disparo #%s: %s", message.id, e
+                )
+                _db.mark_campaign_message_failed(message.id, str(e))
+                counters["falha"] += 1
+
+        if index < len(messages) - 1:
+            time.sleep(CAMPAIGN_SEND_INTERVAL_SECONDS)
+
+    return {"ok": True, "processed": len(messages), **counters}
 
 
 def process_customer_message(

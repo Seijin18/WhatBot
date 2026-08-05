@@ -18,8 +18,10 @@ import unicodedata
 
 from whatbot.channels import WHATSAPP, normalize_channel
 from whatbot.db import (
+    CAMPAIGN_MESSAGE_STATUSES,
     CONTACT_STATUSES,
     CONTACT_TIPO_CLIENTES,
+    CampaignMessage,
     ChannelCredential,
     Contact,
     MessageRecord,
@@ -175,6 +177,9 @@ class FakeDatabase:
         self.send_fail_streaks: Dict[str, int] = {}
         # Mirrors `produtos_catalogo` (catalog-product-sync).
         self.catalog_products: Dict[str, dict] = {}
+        # Mirrors `disparo_mensagens` (campaign-csv-broadcast).
+        self.campaign_messages: Dict[int, dict] = {}
+        self._next_campaign_message_id = 1
 
     # -- infra -----------------------------------------------------------
 
@@ -726,3 +731,72 @@ class FakeDatabase:
             for pid in product_ids
             if pid in self.catalog_products
         ]
+
+    # -- mass-broadcast campaign queue (campaign-csv-broadcast) -----------
+
+    def _row_to_campaign_message(self, row: dict) -> CampaignMessage:
+        return CampaignMessage(
+            id=row["id"],
+            lote=row["lote"],
+            canal=row["canal"],
+            external_id=row["external_id"],
+            mensagem=row["mensagem"],
+            status=row["status"],
+            tentativas=row["tentativas"],
+            erro=row["erro"],
+            criado_em=row["criado_em"],
+            enviado_em=row["enviado_em"],
+        )
+
+    def insert_campaign_message(
+        self, lote: str, canal: str, external_id: str, mensagem: str
+    ) -> int:
+        message_id = self._next_campaign_message_id
+        self._next_campaign_message_id += 1
+        self.campaign_messages[message_id] = {
+            "id": message_id,
+            "lote": lote,
+            "canal": normalize_channel(canal),
+            "external_id": external_id,
+            "mensagem": mensagem,
+            "status": "pendente",
+            "tentativas": 0,
+            "erro": None,
+            "criado_em": _now(),
+            "enviado_em": None,
+        }
+        return message_id
+
+    def get_pending_campaign_messages(self, limit: int) -> List[CampaignMessage]:
+        pending = [
+            r for r in self.campaign_messages.values() if r["status"] == "pendente"
+        ]
+        pending.sort(key=lambda r: (r["criado_em"], r["id"]))
+        return [self._row_to_campaign_message(r) for r in pending[:limit]]
+
+    def mark_campaign_message_sent(self, message_id: int) -> None:
+        row = self.campaign_messages[message_id]
+        row["status"] = "enviado"
+        row["enviado_em"] = _now()
+
+    def mark_campaign_message_retry(
+        self, message_id: int, tentativas: int, erro: str
+    ) -> None:
+        row = self.campaign_messages[message_id]
+        row["tentativas"] = tentativas
+        row["erro"] = erro
+
+    def mark_campaign_message_failed(self, message_id: int, erro: str) -> None:
+        row = self.campaign_messages[message_id]
+        row["status"] = "falha"
+        row["erro"] = erro
+
+    def mark_campaign_message_skipped(self, message_id: int) -> None:
+        self.campaign_messages[message_id]["status"] = "pulado"
+
+    def get_campaign_status(self, lote: str) -> dict:
+        counts = {status: 0 for status in CAMPAIGN_MESSAGE_STATUSES}
+        for row in self.campaign_messages.values():
+            if row["lote"] == lote:
+                counts[row["status"]] = counts.get(row["status"], 0) + 1
+        return counts
