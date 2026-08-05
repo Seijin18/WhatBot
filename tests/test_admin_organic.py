@@ -1,4 +1,5 @@
 import os
+import re
 import unittest
 from unittest.mock import patch
 
@@ -37,6 +38,11 @@ class TestAdminNlu(unittest.TestCase):
     def test_reactivate_intent(self):
         intent = parse_admin_intent("libera o bot para Maria")
         self.assertEqual(intent.action, "reactivate")
+
+    def test_pause_intent(self):
+        intent = parse_admin_intent("pausa o bot para o João")
+        self.assertEqual(intent.action, "pause")
+        self.assertIn("joão", intent.query.lower())
 
     def test_mark_active_client_intent_suffix_phrasing(self):
         intent = parse_admin_intent("marca a Maria como cliente ativo")
@@ -318,6 +324,190 @@ class TestMarkActiveClientCommand(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertIn("Não encontrei", result["reply"])
+
+
+class TestPausarBotDb(unittest.TestCase):
+    """`Database.pausar_bot` (admin-bot-pause), exercised through
+    `FakeDatabase.pausar_bot`, which mirrors the same contract."""
+
+    def test_deactivates_ia_ativa_and_returns_true_for_existing_contact(self):
+        db = FakeDatabase()
+        contact = db.create_contact(phone="5511888888888", push_name="Pedro")
+
+        self.assertTrue(db.pausar_bot("5511888888888"))
+        self.assertFalse(db.contacts[contact.id]["ia_ativa"])
+
+    def test_returns_false_for_nonexistent_contact(self):
+        db = FakeDatabase()
+
+        self.assertFalse(db.pausar_bot("5511000000000"))
+
+    def test_does_not_set_bot_resume_at(self):
+        """Decisão 2 (design.md): a manual pause is indefinite — it must
+        never set `bot_resume_at`, or `process_auto_reactivations()` would
+        pick it up on a schedule."""
+        db = FakeDatabase()
+        contact = db.create_contact(phone="5511888888888", push_name="Pedro")
+
+        db.pausar_bot("5511888888888")
+
+        self.assertIsNone(db.contacts[contact.id]["bot_resume_at"])
+
+
+class TestPauseCommand(unittest.TestCase):
+    """`admin-bot-pause`: admin command to pause the bot for a contact
+    outside the handover queue, reusing the same resolution/disambiguation
+    shape as `TestReactivateDisambiguationShowsChannel` /
+    `TestMarkActiveClientCommand`."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"ADMIN_NOTIFY_PHONES": "5511900000001"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_single_match_pauses_the_contact_directly(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        contact = db.create_contact(phone="5511888888888", push_name="Pedro")
+        self.assertTrue(contact.ia_ativa)
+
+        result = handle_admin_message(
+            "5511900000001", "pausa o bot para o Pedro", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("pausado", result["reply"].lower())
+        self.assertFalse(db.get_contact_by_phone("5511888888888").ia_ativa)
+
+    def test_phone_query_pauses_the_contact_directly(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro")
+
+        result = handle_admin_message(
+            "5511900000001", "desativa o bot 5511888888888", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(db.get_contact_by_phone("5511888888888").ia_ativa)
+
+    def test_two_active_contacts_named_maria_trigger_disambiguation_then_resolve(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Maria Silva")
+        db.create_contact(phone="5511777777777", push_name="Maria Costa")
+
+        disambiguation = handle_admin_message(
+            "5511900000001", "pausa o bot para a Maria", db, router, contact_id=1
+        )
+        self.assertTrue(disambiguation["ok"])
+        self.assertIn("Encontrei vários contatos", disambiguation["reply"])
+
+        picked = handle_admin_message("5511900000001", "1", db, router, contact_id=1)
+
+        self.assertTrue(picked["ok"])
+        self.assertIn("pausado", picked["reply"].lower())
+        # `search_contacts_for_admin` orders candidates most-recent-first, so
+        # option "1" is Maria Costa (created second, 5511777777777).
+        self.assertFalse(db.get_contact_by_phone("5511777777777").ia_ativa)
+        # The other Maria is untouched.
+        self.assertTrue(db.get_contact_by_phone("5511888888888").ia_ativa)
+
+    def test_already_paused_contact_is_not_offered_and_replies_without_error(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(
+            phone="5511888888888", push_name="Pedro", ia_ativa=False
+        )
+
+        result = handle_admin_message(
+            "5511900000001", "pausa o bot para o Pedro", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("já está com o bot pausado", result["reply"])
+
+    def test_contact_not_found_replies_without_crashing(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+
+        result = handle_admin_message(
+            "5511900000001", "pausa o bot para a Fulana", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("Não encontrei", result["reply"])
+
+    def test_paused_contact_is_not_picked_up_by_auto_reactivations(self):
+        """Scenario "Contato pausado não é reativado automaticamente" —
+        `bot_resume_at` stays `NULL`, so the sweep never touches it."""
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro")
+
+        handle_admin_message(
+            "5511900000001", "pausa o bot para o Pedro", db, router, contact_id=1
+        )
+        self.assertFalse(db.get_contact_by_phone("5511888888888").ia_ativa)
+
+        reactivated = db.process_auto_reactivations()
+
+        self.assertEqual(reactivated, [])
+        self.assertFalse(db.get_contact_by_phone("5511888888888").ia_ativa)
+
+    def test_existing_reactivate_command_still_resumes_a_manually_paused_contact(self):
+        """Scenario "Comando de reativação existente também retoma pausa
+        manual" — `libera o bot` (`reactivate`, untouched by this change)
+        reactivates a contact paused by the new `pause` command, because
+        both share the same `ia_ativa` field."""
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro")
+
+        handle_admin_message(
+            "5511900000001", "pausa o bot para o Pedro", db, router, contact_id=1
+        )
+        self.assertFalse(db.get_contact_by_phone("5511888888888").ia_ativa)
+
+        # "reativar" phrasing rather than "libera o bot para o Pedro": the
+        # latter's "para" is not swallowed by `_REACTIVATE` (pre-existing,
+        # out of this change's scope — `_REACTIVATE` must not be modified),
+        # so `search_contacts_for_admin`'s raw substring match would miss.
+        result = handle_admin_message(
+            "5511900000001", "reativar Pedro", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(db.get_contact_by_phone("5511888888888").ia_ativa)
+
+    def test_confirmation_message_suggests_a_command_that_actually_reactivates(self):
+        """Regression (critic finding): the *exact* phrase suggested by the
+        pause confirmation message must work when the target was resolved
+        by name (the common case), not just by phone. Extracts the
+        suggested command straight out of the reply text and executes it
+        verbatim — a literal "libera o bot para {label}" alternative would
+        NOT have caught this, since `_REACTIVATE` doesn't swallow a
+        trailing "para o/a" and `search_contacts_for_admin` matches by raw
+        substring."""
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro")
+
+        pause_result = handle_admin_message(
+            "5511900000001", "pausa o bot para o Pedro", db, router, contact_id=1
+        )
+        self.assertFalse(db.get_contact_by_phone("5511888888888").ia_ativa)
+
+        match = re.search(r"Envie \*(.+?)\*", pause_result["reply"])
+        self.assertIsNotNone(match, pause_result["reply"])
+        suggested_command = match.group(1)
+
+        result = handle_admin_message(
+            "5511900000001", suggested_command, db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(db.get_contact_by_phone("5511888888888").ia_ativa)
 
 
 if __name__ == "__main__":

@@ -480,6 +480,15 @@ class FakeDatabase:
         )
         return True
 
+    def pausar_bot(self, phone: str, *, canal: str | None = None) -> bool:
+        """Mirrors `Database.pausar_bot` (admin-bot-pause): only flips
+        `ia_ativa`, leaves `bot_resume_at` untouched."""
+        row = self._find_by_identity(phone, canal)
+        if not row:
+            return False
+        row["ia_ativa"] = False
+        return True
+
     def process_auto_reactivations(self) -> list[str]:
         """Mirrors `Database.process_auto_reactivations`: returns labels, not
         raw `phone` (which is `None` for non-WhatsApp contacts)."""

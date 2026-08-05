@@ -11,6 +11,7 @@ IntentAction = Literal[
     "assume",
     "complete",
     "reactivate",
+    "pause",
     "mark_active_client",
     "summary",
     "help",
@@ -39,6 +40,22 @@ _COMPLETE = re.compile(
 )
 _REACTIVATE = re.compile(
     r"\b(reativar|libera(?:r)?\s+(?:o\s+)?bot|volta(?:r)?\s+(?:o\s+)?bot|bot\s+(?:pode|volta)\b|pode\s+voltar\s+a\s+falar)\b",
+    re.I,
+)
+
+# `admin-bot-pause`: manual pause, distinct verbs from `_REACTIVATE`
+# ("pausar/desativar/desligar" vs. "reativar/libera") so the two never
+# collide. The "para (o/a) " alternative is tried first (alternation order
+# matters — Python `re` picks the first alternative that matches at a given
+# position, not the longest) so a trailing "para o João"/"para a Maria" gets
+# swallowed along with the trigger itself, leaving a clean name for
+# `search_contacts_for_admin`'s raw substring match (same concern as
+# `_MARK_ACTIVE_CLIENT_PREFIX` above — a stray leading "para" would make an
+# otherwise-matching `push_name` miss entirely).
+_PAUSE_VERB = r"(?:pausa(?:r)?|desativa(?:r)?|desliga(?:r)?)"
+_PAUSE = re.compile(
+    rf"\b{_PAUSE_VERB}\s+(?:o\s+)?bot\s+para\s+(?:o\s+|a\s+)?"
+    rf"|\b{_PAUSE_VERB}\s+(?:o\s+)?bot\b",
     re.I,
 )
 _SUMMARY = re.compile(r"\b(resumo|estat[ií]sticas|stats)\b", re.I)
@@ -100,6 +117,10 @@ def parse_admin_intent(text: str) -> AdminIntent:
     if _REACTIVATE.search(lower):
         query = _strip_intent_prefix(raw, _REACTIVATE)
         return AdminIntent("reactivate", query or raw)
+
+    if _PAUSE.search(lower):
+        query = _strip_intent_prefix(raw, _PAUSE)
+        return AdminIntent("pause", query or raw)
 
     if _MARK_ACTIVE_CLIENT_SUFFIX.search(lower):
         query = _strip_intent_suffix(raw, _MARK_ACTIVE_CLIENT_SUFFIX)

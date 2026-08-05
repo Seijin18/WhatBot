@@ -210,6 +210,32 @@ def _execute_action(
             f"Contato {label} não encontrado.",
         )
 
+    if acao == "pause":
+        if db.pausar_bot(target.external_id, canal=target.canal):
+            return _reply(
+                router,
+                db,
+                admin_phone,
+                contact_id,
+                # "reativar {label}", não "libera o bot para {label}":
+                # `_REACTIVATE` não engole o "para o/a" que sobraria antes
+                # do nome, e `search_contacts_for_admin` faz substring cru
+                # (não tokenizado) — a query final "para o {label}" nunca
+                # bateria contra o `push_name` quando o alvo foi resolvido
+                # por nome (o caso comum). "reativar {label}" funciona nos
+                # dois casos (nome ou telefone) — ver
+                # `TestPauseCommand.test_confirmation_message_suggests_a_command_that_actually_reactivates`.
+                f"🔕 Bot pausado para *{label}*. Envie *reativar {label}* "
+                "para retomar.",
+            )
+        return _reply(
+            router,
+            db,
+            admin_phone,
+            contact_id,
+            f"Contato {label} não encontrado.",
+        )
+
     if acao == "mark_active_client":
         # `set_contact_status` takes a numeric contact id, not the
         # `(external_id, canal)` identity `target` carries — mirrors how
@@ -304,6 +330,59 @@ def _resolve_reactivate(
         return None, "\n".join(lines)
 
     return None, f"Não encontrei contato inativo com bot desligado para *{query.strip()}*."
+
+
+def _resolve_pause(
+    query: str, admin_phone: str, db: Database
+) -> tuple[TargetIdentity | None, str | None]:
+    """Same resolution/disambiguation shape as `_resolve_reactivate`, but
+    with the `ia_ativa` filter inverted (`admin-bot-pause`): only a contact
+    that still has the bot active is offered as a target — a name match
+    that turns out to already be paused gets an idempotent "já está
+    pausado" reply instead of silently disappearing as "não encontrado"."""
+    phone = extract_phone_from_text(query)
+    if phone:
+        return TargetIdentity(external_id=phone, canal=WHATSAPP, label=phone), None
+
+    all_rows = db.search_contacts_for_admin(query)
+    rows = [r for r in all_rows if r["ia_ativa"]]
+    if len(rows) == 1:
+        r = rows[0]
+        return (
+            TargetIdentity(
+                external_id=r["external_id"] or r["phone"],
+                canal=r["canal"],
+                label=r["label"],
+            ),
+            None,
+        )
+    if len(rows) > 1:
+        candidatos = [
+            {
+                "id": r["id"],
+                "phone": r["phone"],
+                "push_name": r["push_name"],
+                "minutes_waiting": 0,
+                "prioridade": 0,
+                "canal": r["canal"],
+                "external_id": r["external_id"],
+                "handle": r["handle"],
+            }
+            for r in rows[:5]
+        ]
+        db.save_admin_sessao(admin_phone, "pause", candidatos)
+        lines = ["Encontrei vários contatos. Qual deles?"]
+        for idx, r in enumerate(rows[:5], start=1):
+            name = r["push_name"] or "Sem nome"
+            fila = " (na fila)" if r["in_queue"] else ""
+            canal = channel_label(r["canal"])
+            lines.append(f"*{idx}.* {name} — {r['label']} · {canal}{fila}")
+        lines.append("\nResponda com *1*, *2*... ou o telefone.")
+        return None, "\n".join(lines)
+
+    if all_rows:
+        return None, f"*{query.strip()}* já está com o bot pausado."
+    return None, f"Não encontrei contato para *{query.strip()}*."
 
 
 def _resolve_mark_active_client(
@@ -426,6 +505,14 @@ def handle_admin_message(
             return _reply(router, db, admin_phone, contact_id, err)
         return _execute_action(
             "reactivate", target, admin_phone, db, router, contact_id
+        )
+
+    if intent.action == "pause" and intent.query:
+        target, err = _resolve_pause(intent.query, admin_phone, db)
+        if err:
+            return _reply(router, db, admin_phone, contact_id, err)
+        return _execute_action(
+            "pause", target, admin_phone, db, router, contact_id
         )
 
     if intent.action == "mark_active_client" and intent.query:

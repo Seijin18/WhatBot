@@ -781,6 +781,29 @@ class Database:
                 )
                 return cur.fetchone() is not None
 
+    def pausar_bot(self, phone: str, *, canal: str | None = None) -> bool:
+        """Manually pause the bot for a contact outside the handover queue
+        (`admin-bot-pause`). Mirrors `reativar_bot`'s `(canal, external_id)`
+        resolution, but only flips `ia_ativa` — `bot_resume_at` is left
+        untouched (design.md, Decisão 2): a manual pause is indefinite, not
+        a handover with an automatic resume deadline, so
+        `process_auto_reactivations()`'s `bot_resume_at <= now()` sweep must
+        never pick these rows up on its own."""
+        canal = normalize_channel(canal)
+        self.init_pool()
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE contatos
+                    SET ia_ativa = FALSE
+                    WHERE canal = %s AND external_id = %s
+                    RETURNING id
+                    """,
+                    (canal, phone),
+                )
+                return cur.fetchone() is not None
+
     def mark_all_attended(
         self,
         reativar_bot: bool = False,
