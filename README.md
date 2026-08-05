@@ -89,7 +89,7 @@ python scripts/health_check.py
 - `windmill/f/whatbot/` — scripts publicados no Windmill
 - `scripts/` — pareamento, webhook, health check
 
-Edite `knowledge/base.md` para produtos/modalidades, preços, FAQ e contatos. Formato em [`knowledge/README.md`](knowledge/README.md).
+Edite `knowledge/base.md` para produtos/itens, preços, FAQ e contatos. Formato em [`knowledge/README.md`](knowledge/README.md).
 
 ## Desenvolvimento local (sem Docker)
 

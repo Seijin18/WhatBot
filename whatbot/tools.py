@@ -5,37 +5,37 @@ from __future__ import annotations
 from .knowledge import get_knowledge_store
 
 
-def listar_modalidades() -> str:
-    """Lista todos os produtos, serviços ou modalidades cadastrados no negócio.
+def listar_itens() -> str:
+    """Lista todos os produtos, serviços ou itens cadastrados no negócio.
 
     Returns:
         Nome, horários/prazos e preços de cada item cadastrado.
     """
-    return get_knowledge_store().listar_modalidades()
+    return get_knowledge_store().listar_itens()
 
 
-def buscar_horarios_turmas(modalidade: str) -> str:
-    """Consulta horários de um produto, serviço ou modalidade específica.
+def buscar_horarios_turmas(item: str) -> str:
+    """Consulta horários de um produto, serviço ou item específico.
 
     Args:
-        modalidade: Nome do item cadastrado na base de conhecimento.
+        item: Nome do item cadastrado na base de conhecimento.
 
     Returns:
         Horários e observações do item solicitado.
     """
-    return get_knowledge_store().buscar_horarios(modalidade)
+    return get_knowledge_store().buscar_horarios(item)
 
 
-def buscar_precos(modalidade: str = "") -> str:
+def buscar_precos(item: str = "") -> str:
     """Consulta preços e regras de compra/pagamento.
 
     Args:
-        modalidade: Nome do item. Se vazio, retorna a tabela completa.
+        item: Nome do item. Se vazio, retorna a tabela completa.
 
     Returns:
         Preço do item ou tabela geral com condições e formas de pagamento.
     """
-    return get_knowledge_store().buscar_precos(modalidade or None)
+    return get_knowledge_store().buscar_precos(item or None)
 
 
 def buscar_info_negocio(topico: str) -> str:
@@ -79,7 +79,7 @@ def encaminhar_para_secretaria(motivo: str) -> str:
 
 
 AGENT_TOOLS = [
-    listar_modalidades,
+    listar_itens,
     buscar_horarios_turmas,
     buscar_precos,
     buscar_info_negocio,

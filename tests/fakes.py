@@ -17,11 +17,34 @@ import re
 import unicodedata
 
 from whatbot.channels import WHATSAPP, normalize_channel
-from whatbot.db import ChannelCredential, Contact, MessageRecord, WaitingContact, resolve_label
+from whatbot.db import (
+    CAMPAIGN_MESSAGE_STATUSES,
+    CONTACT_STATUSES,
+    CONTACT_TIPO_CLIENTES,
+    CampaignMessage,
+    ChannelCredential,
+    Contact,
+    MessageRecord,
+    WaitingContact,
+    resolve_label,
+)
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _fold(text: str) -> str:
+    """Accent-fold + lowercase, mirroring `whatbot.contact_resolver._fold`.
+
+    Used by `FakeDatabase.search_contacts_for_admin` on *both* sides of the
+    comparison — the query term and the stored `push_name`/`handle` — to
+    mirror `Database.search_contacts_for_admin`'s `unaccent(push_name)` on
+    the real Postgres side. Folding only the query term (as the buggy
+    version did) misses a stored "João" when the admin types "Joao".
+    """
+    folded = unicodedata.normalize("NFKD", text.lower())
+    return folded.encode("ascii", "ignore").decode("ascii")
 
 
 class FakeClient:
@@ -165,6 +188,11 @@ class FakeDatabase:
         self.channel_credentials: Dict[str, dict] = {}
         # Mirrors `canal_envio_falhas` (critic BLOQUEADOR 1: persisted streak).
         self.send_fail_streaks: Dict[str, int] = {}
+        # Mirrors `produtos_catalogo` (catalog-product-sync).
+        self.catalog_products: Dict[str, dict] = {}
+        # Mirrors `disparo_mensagens` (campaign-csv-broadcast).
+        self.campaign_messages: Dict[int, dict] = {}
+        self._next_campaign_message_id = 1
 
     # -- infra -----------------------------------------------------------
 
@@ -194,6 +222,7 @@ class FakeDatabase:
             canal=row["canal"],
             external_id=row["external_id"],
             handle=row["handle"],
+            tipo_cliente=row.get("tipo_cliente", "b2c"),
         )
 
     def _row_to_waiting(self, row: dict) -> WaitingContact:
@@ -211,6 +240,10 @@ class FakeDatabase:
             external_id=row["external_id"],
             handle=row["handle"],
             last_inbound_at=row.get("last_inbound_at"),
+            # handover-summary-for-agent: mirrors the `status`/`session_state`
+            # columns `Database._row_to_waiting` now selects.
+            status=row.get("status"),
+            session_state=dict(row.get("session_state") or {}),
         )
 
     def _is_waiting_row(self, row: dict) -> bool:
@@ -266,6 +299,7 @@ class FakeDatabase:
             "external_id": external_id,
             "handle": handle,
             "last_inbound_at": None,
+            "tipo_cliente": "b2c",
         }
         self.contacts[contact_id] = row
         return self._row_to_contact(row)
@@ -282,6 +316,21 @@ class FakeDatabase:
 
     def update_contact_ia_active(self, contact_id: int, ia_ativa: bool) -> None:
         self.contacts[contact_id]["ia_ativa"] = ia_ativa
+
+    def set_contact_status(self, contact_id: int, status: str) -> None:
+        if status not in CONTACT_STATUSES:
+            raise ValueError(
+                f"status inválido: {status!r} (esperado um de {sorted(CONTACT_STATUSES)})"
+            )
+        self.contacts[contact_id]["status"] = status
+
+    def set_contact_tipo_cliente(self, contact_id: int, tipo_cliente: str) -> None:
+        if tipo_cliente not in CONTACT_TIPO_CLIENTES:
+            raise ValueError(
+                f"tipo_cliente inválido: {tipo_cliente!r} "
+                f"(esperado um de {sorted(CONTACT_TIPO_CLIENTES)})"
+            )
+        self.contacts[contact_id]["tipo_cliente"] = tipo_cliente
 
     def update_contact_last_inbound(
         self, contact_id: int, when: datetime | None = None
@@ -460,6 +509,15 @@ class FakeDatabase:
         )
         return True
 
+    def pausar_bot(self, phone: str, *, canal: str | None = None) -> bool:
+        """Mirrors `Database.pausar_bot` (admin-bot-pause): only flips
+        `ia_ativa`, leaves `bot_resume_at` untouched."""
+        row = self._find_by_identity(phone, canal)
+        if not row:
+            return False
+        row["ia_ativa"] = False
+        return True
+
     def process_auto_reactivations(self) -> list[str]:
         """Mirrors `Database.process_auto_reactivations`: returns labels, not
         raw `phone` (which is `None` for non-WhatsApp contacts)."""
@@ -541,14 +599,6 @@ class FakeDatabase:
             for m in rows[:limit]
         ]
 
-    def get_last_inbound_message(self, contact_id: int) -> str | None:
-        rows = [
-            m
-            for m in self.messages
-            if m["contact_id"] == contact_id and m["direction"] == "in"
-        ]
-        return rows[-1]["text"] if rows else None
-
     # -- admin sessions --------------------------------------------------
 
     def save_admin_sessao(
@@ -584,15 +634,14 @@ class FakeDatabase:
                 or (r["external_id"] and phone[-8:] in r["external_id"])
             ]
         else:
-            folded = unicodedata.normalize("NFKD", query.lower())
-            term = folded.encode("ascii", "ignore").decode("ascii")
+            term = _fold(query)
             matches = [
                 r
                 for r in self.contacts.values()
                 if term
                 and (
-                    term in (r["push_name"] or "").lower()
-                    or term in (r["handle"] or "").lower()
+                    term in _fold(r["push_name"] or "")
+                    or term in _fold(r["handle"] or "")
                 )
             ]
         matches.sort(key=lambda r: r["created_at"], reverse=True)
@@ -606,6 +655,7 @@ class FakeDatabase:
                 "canal": r["canal"],
                 "external_id": r["external_id"],
                 "handle": r["handle"],
+                "tipo_cliente": r.get("tipo_cliente", "b2c"),
                 "label": resolve_label(r["push_name"], r["handle"], r["external_id"] or r["phone"]),
             }
             for r in matches[:5]
@@ -673,3 +723,92 @@ class FakeDatabase:
         if not row:
             return None
         return ChannelCredential(**row)
+
+    # -- product catalog cache (catalog-product-sync) ---------------------
+
+    def upsert_catalog_products(self, products: List[dict]) -> None:
+        for product in products:
+            product_id = product["product_id"]
+            self.catalog_products[product_id] = {
+                "product_id": product_id,
+                "nome": product.get("nome"),
+                "preco": product.get("preco"),
+                "disponivel": product.get("disponivel"),
+                "last_synced_at": _now(),
+            }
+
+    def resolve_catalog_items(self, product_ids: List[str]) -> List[dict]:
+        return [
+            dict(self.catalog_products[pid])
+            for pid in product_ids
+            if pid in self.catalog_products
+        ]
+
+    # -- mass-broadcast campaign queue (campaign-csv-broadcast) -----------
+
+    def _row_to_campaign_message(self, row: dict) -> CampaignMessage:
+        return CampaignMessage(
+            id=row["id"],
+            lote=row["lote"],
+            canal=row["canal"],
+            external_id=row["external_id"],
+            mensagem=row["mensagem"],
+            status=row["status"],
+            tentativas=row["tentativas"],
+            erro=row["erro"],
+            criado_em=row["criado_em"],
+            enviado_em=row["enviado_em"],
+        )
+
+    def insert_campaign_message(
+        self, lote: str, canal: str, external_id: str, mensagem: str
+    ) -> int:
+        message_id = self._next_campaign_message_id
+        self._next_campaign_message_id += 1
+        self.campaign_messages[message_id] = {
+            "id": message_id,
+            "lote": lote,
+            "canal": normalize_channel(canal),
+            "external_id": external_id,
+            "mensagem": mensagem,
+            "status": "pendente",
+            "tentativas": 0,
+            "erro": None,
+            "criado_em": _now(),
+            "enviado_em": None,
+        }
+        return message_id
+
+    def get_pending_campaign_messages(self, limit: int) -> List[CampaignMessage]:
+        pending = [
+            r for r in self.campaign_messages.values() if r["status"] == "pendente"
+        ]
+        pending.sort(key=lambda r: (r["criado_em"], r["id"]))
+        return [self._row_to_campaign_message(r) for r in pending[:limit]]
+
+    def mark_campaign_message_sent(self, message_id: int) -> None:
+        row = self.campaign_messages[message_id]
+        row["status"] = "enviado"
+        row["enviado_em"] = _now()
+
+    def mark_campaign_message_retry(
+        self, message_id: int, tentativas: int, erro: str
+    ) -> None:
+        row = self.campaign_messages[message_id]
+        row["tentativas"] = tentativas
+        row["erro"] = erro
+
+    def mark_campaign_message_failed(self, message_id: int, erro: str) -> None:
+        row = self.campaign_messages[message_id]
+        row["status"] = "falha"
+        row["erro"] = erro
+
+    def mark_campaign_message_skipped(self, message_id: int) -> None:
+        self.campaign_messages[message_id]["status"] = "pulado"
+
+    def get_campaign_status(self, lote: str) -> dict:
+        counts = {status: 0 for status in CAMPAIGN_MESSAGE_STATUSES}
+        for row in self.campaign_messages.values():
+            if row["lote"] == lote:
+                counts[row["status"]] = counts.get(row["status"], 0) + 1
+        return counts

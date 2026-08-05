@@ -104,6 +104,135 @@ class TestSimulation(unittest.TestCase):
         self.assertTrue(kwargs["simulated"])
 
 
+class TestFetchCatalog(unittest.TestCase):
+    """catalog-product-sync: `EvolutionApiClient.fetch_catalog`."""
+
+    def setUp(self):
+        self.client = build_client()
+
+    def test_builds_the_expected_request(self):
+        response = MagicMock(ok=True)
+        response.json.return_value = []
+
+        with patch(
+            "whatbot.channels.whatsapp_evolution.requests.post",
+            return_value=response,
+        ) as post:
+            self.client.fetch_catalog()
+
+        url, = post.call_args.args
+        kwargs = post.call_args.kwargs
+        self.assertEqual(url, "http://evolution-api:8080/chat/fetchCatalogs/whatbot")
+        self.assertEqual(kwargs["headers"]["apikey"], "secret-key")
+        self.assertEqual(kwargs["timeout"], 10)
+
+    def test_maps_raw_catalog_items_to_the_local_schema(self):
+        response = MagicMock(ok=True)
+        response.json.return_value = [
+            {"id": "PROD-1", "name": "Camiseta", "price": 4990, "isHidden": False},
+            {"id": "PROD-2", "name": "Boné", "price": 2990, "isHidden": True},
+        ]
+
+        with patch(
+            "whatbot.channels.whatsapp_evolution.requests.post",
+            return_value=response,
+        ):
+            products = self.client.fetch_catalog()
+
+        self.assertEqual(
+            products,
+            [
+                {
+                    "product_id": "PROD-1",
+                    "nome": "Camiseta",
+                    "preco": 4990,
+                    "disponivel": True,
+                },
+                {
+                    "product_id": "PROD-2",
+                    "nome": "Boné",
+                    "preco": 2990,
+                    "disponivel": False,
+                },
+            ],
+        )
+
+    def test_response_wrapped_in_a_catalog_key_is_also_accepted(self):
+        response = MagicMock(ok=True)
+        response.json.return_value = {
+            "catalog": [{"id": "PROD-1", "name": "Camiseta", "price": 4990}]
+        }
+
+        with patch(
+            "whatbot.channels.whatsapp_evolution.requests.post",
+            return_value=response,
+        ):
+            products = self.client.fetch_catalog()
+
+        self.assertEqual(len(products), 1)
+        self.assertEqual(products[0]["product_id"], "PROD-1")
+
+    def test_item_without_a_recognizable_id_is_dropped_others_still_persisted(self):
+        """Critic feedback (catalog-product-sync): a malformed item must not
+        cost every other valid product in the same response — and must not
+        surface as `product_id=None` reaching `Database.upsert_catalog_products`,
+        which would violate the `PRIMARY KEY NOT NULL` constraint."""
+        response = MagicMock(ok=True)
+        response.json.return_value = [
+            {"id": "PROD-1", "name": "Camiseta", "price": 4990},
+            {"name": "Sem id reconhecível", "price": 1000},
+        ]
+
+        with patch(
+            "whatbot.channels.whatsapp_evolution.requests.post",
+            return_value=response,
+        ):
+            products = self.client.fetch_catalog()
+
+        self.assertEqual(len(products), 1)
+        self.assertEqual(products[0]["product_id"], "PROD-1")
+
+    def test_non_dict_item_in_the_raw_list_is_dropped_not_raised(self):
+        """A non-dict raw item must not raise `AttributeError` — the whole
+        point of moving normalization inside the `try` is that only
+        `requests.RequestException` propagates out of `fetch_catalog`."""
+        response = MagicMock(ok=True)
+        response.json.return_value = [
+            {"id": "PROD-1", "name": "Camiseta", "price": 4990},
+            "not-a-product-dict",
+            None,
+            42,
+        ]
+
+        with patch(
+            "whatbot.channels.whatsapp_evolution.requests.post",
+            return_value=response,
+        ):
+            products = self.client.fetch_catalog()
+
+        self.assertEqual(len(products), 1)
+        self.assertEqual(products[0]["product_id"], "PROD-1")
+
+    def test_network_failure_propagates(self):
+        with patch(
+            "whatbot.channels.whatsapp_evolution.requests.post",
+            side_effect=requests.ConnectionError("sem rede"),
+        ):
+            with self.assertRaises(requests.RequestException):
+                self.client.fetch_catalog()
+
+    def test_http_error_response_propagates(self):
+        response = MagicMock(ok=False, status_code=500, text="erro interno")
+        response.raise_for_status.side_effect = requests.HTTPError("500")
+
+        with patch(
+            "whatbot.channels.whatsapp_evolution.requests.post",
+            return_value=response,
+        ):
+            with self.assertRaises(requests.RequestException):
+                self.client.fetch_catalog()
+
+
 class TestFailure(unittest.TestCase):
     def setUp(self):
         log_patch = patch("whatbot.channels.whatsapp_evolution.log_outbound")

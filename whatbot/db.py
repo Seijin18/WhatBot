@@ -29,6 +29,31 @@ def resolve_label(
     return name or handle or external_id or ""
 
 
+# Closed set of `contatos.status` values (contact-interest-memory). Validated
+# in Python by `Database.set_contact_status`/`create_contact`'s caller-supplied
+# default — no DB `CHECK` constraint, same style as other setters in this
+# module (see `update_contact_ia_active`).
+CONTACT_STATUSES = {
+    "novo_lead",
+    "interessado",
+    "comprando",
+    "cliente_ativo",
+    "cancelado",
+}
+
+# Closed set of `contatos.tipo_cliente` values (contact-segmentation-b2b-b2c).
+# Validated in Python by `Database.set_contact_tipo_cliente` — same style as
+# `CONTACT_STATUSES` above, no DB `CHECK` constraint (see design.md,
+# Decisão 1).
+CONTACT_TIPO_CLIENTES = {"b2c", "b2b"}
+
+# Closed set of `disparo_mensagens.status` values (campaign-csv-broadcast).
+# Same style as `CONTACT_STATUSES`/`CONTACT_TIPO_CLIENTES` — no DB `CHECK`
+# constraint, transitions are enforced by the Python call sites
+# (`whatbot.main.send_campaign_queue`), not by the schema itself.
+CAMPAIGN_MESSAGE_STATUSES = {"pendente", "enviado", "falha", "pulado"}
+
+
 @dataclass
 class Contact:
     id: int
@@ -44,6 +69,7 @@ class Contact:
     canal: str = WHATSAPP
     external_id: str | None = None
     handle: str | None = None
+    tipo_cliente: str = "b2c"
 
     @property
     def label(self) -> str:
@@ -64,6 +90,14 @@ class WaitingContact:
     external_id: str | None = None
     handle: str | None = None
     last_inbound_at: datetime | None = None
+    # Aditive fields (handover-summary-for-agent): `contatos.status` and
+    # `contatos.session_state`, needed to build the handover summary
+    # (`whatbot/queue.py::build_contact_summary`). `None` for callers that
+    # reconstruct a `WaitingContact` without this data (e.g.
+    # `contact_resolver.py`'s admin-session replay) — the summary degrades
+    # gracefully in that case.
+    status: str | None = None
+    session_state: dict[str, Any] | None = None
 
     @property
     def label(self) -> str:
@@ -95,6 +129,27 @@ class ChannelCredential:
     refreshed_at: datetime | None
 
 
+@dataclass
+class CampaignMessage:
+    """Row of `disparo_mensagens` (see `ensure_schema()`, campaign-csv-broadcast).
+
+    One row per contact per imported batch (`lote`), enqueued by
+    `whatbot.main.import_campaign` and drained by
+    `whatbot.main.send_campaign_queue`.
+    """
+
+    id: int
+    lote: str
+    canal: str
+    external_id: str
+    mensagem: str
+    status: str
+    tentativas: int
+    erro: str | None
+    criado_em: datetime
+    enviado_em: datetime | None
+
+
 class Database:
     def __init__(self, dsn: str):
         self._dsn = dsn
@@ -116,6 +171,12 @@ class Database:
     def ensure_schema(self) -> None:
         self.init_pool()
         sql = """
+        -- Usada por `search_contacts_for_admin` para dobrar acentos também no
+        -- lado do `push_name`/`handle` armazenados, simetricamente ao fold
+        -- (unicodedata NFKD) já aplicado ao termo de busca digitado pelo
+        -- admin — sem isso "Joao" não batia contra um contato salvo como
+        -- "João" (bug pré-existente, achado durante contact-segmentation-b2b-b2c).
+        CREATE EXTENSION IF NOT EXISTS unaccent;
         CREATE TABLE IF NOT EXISTS contatos (
             id SERIAL PRIMARY KEY,
             phone VARCHAR(32) UNIQUE NOT NULL,
@@ -152,6 +213,10 @@ class Database:
         ALTER TABLE contatos ADD COLUMN IF NOT EXISTS external_id VARCHAR(64);
         ALTER TABLE contatos ADD COLUMN IF NOT EXISTS handle VARCHAR(128);
         ALTER TABLE contatos ADD COLUMN IF NOT EXISTS last_inbound_at TIMESTAMP WITH TIME ZONE;
+        -- contact-segmentation-b2b-b2c: pessoa física (`b2c`) vs. empresa
+        -- (`b2b`), validado em Python (`CONTACT_TIPO_CLIENTES`), sem CHECK de
+        -- banco — mesmo padrão de `status` (ver design.md, Decisão 1).
+        ALTER TABLE contatos ADD COLUMN IF NOT EXISTS tipo_cliente VARCHAR(8) NOT NULL DEFAULT 'b2c';
         UPDATE contatos SET canal = 'whatsapp' WHERE canal IS NULL;
         UPDATE contatos SET external_id = phone WHERE external_id IS NULL;
         ALTER TABLE contatos ALTER COLUMN canal SET NOT NULL;
@@ -214,6 +279,40 @@ class Database:
             streak INTEGER NOT NULL DEFAULT 0,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
         );
+        -- Local cache of the WhatsApp Business catalog (catalog-product-sync,
+        -- see design.md Decisão 1/2): kept in sync by the
+        -- `windmill/f/whatbot/sync_catalog.py` job, resolved with
+        -- `Database.resolve_catalog_items` so `productId`/`retailerId` never
+        -- needs a synchronous call to the Evolution API during customer
+        -- traffic.
+        CREATE TABLE IF NOT EXISTS produtos_catalogo (
+            product_id VARCHAR(64) PRIMARY KEY,
+            nome TEXT,
+            preco NUMERIC,
+            disponivel BOOLEAN,
+            last_synced_at TIMESTAMPTZ
+        );
+        -- Disparo de mensagens em massa via CSV, com fila e limite de taxa
+        -- (campaign-csv-broadcast, ver design.md Decisão 1): fila persistida
+        -- no Postgres em vez de memória/fila externa, já que cada execução do
+        -- bot roda como um job Windmill novo (processo efêmero). Importação
+        -- síncrona (`import_campaign`) enfileira aqui; o worker agendado
+        -- (`send_campaign_queue`) drena respeitando `CAMPAIGN_BATCH_SIZE` e
+        -- `CAMPAIGN_SEND_INTERVAL_SECONDS` (design.md, Decisão 2).
+        CREATE TABLE IF NOT EXISTS disparo_mensagens (
+            id SERIAL PRIMARY KEY,
+            lote VARCHAR(128) NOT NULL,
+            canal VARCHAR(32) NOT NULL DEFAULT 'whatsapp',
+            external_id VARCHAR(64) NOT NULL,
+            mensagem TEXT NOT NULL,
+            status VARCHAR(16) NOT NULL DEFAULT 'pendente',
+            tentativas INTEGER NOT NULL DEFAULT 0,
+            erro TEXT,
+            criado_em TIMESTAMP WITH TIME ZONE DEFAULT now(),
+            enviado_em TIMESTAMP WITH TIME ZONE
+        );
+        CREATE INDEX IF NOT EXISTS disparo_mensagens_lote_status_idx
+            ON disparo_mensagens (lote, status);
         INSERT INTO notificacao_admin (id, pendentes_desde_ultimo_lote) VALUES (1, 0)
         ON CONFLICT (id) DO NOTHING;
         """
@@ -225,18 +324,22 @@ class Database:
             self._logger.exception("Erro criando schema: %s", e)
             raise
 
-    def _row_to_contact(self, row) -> Contact:
-        session_raw = row[9] if len(row) > 9 else None
-        session_state: dict[str, Any] | None
+    @staticmethod
+    def _parse_session_state(session_raw: Any) -> dict[str, Any]:
+        """Normalize a `session_state` JSONB column value (already a `dict`
+        via psycopg's JSONB adapter, a raw JSON string, or `None`/falsy) into
+        a plain `dict`. Shared by `_row_to_contact` and `_row_to_waiting`."""
         if isinstance(session_raw, dict):
-            session_state = session_raw
-        elif session_raw:
+            return session_raw
+        if session_raw:
             try:
-                session_state = json.loads(session_raw)
+                return json.loads(session_raw)
             except (TypeError, json.JSONDecodeError):
-                session_state = {}
-        else:
-            session_state = {}
+                return {}
+        return {}
+
+    def _row_to_contact(self, row) -> Contact:
+        session_state = self._parse_session_state(row[9] if len(row) > 9 else None)
         return Contact(
             id=row[0],
             phone=row[1],
@@ -251,12 +354,13 @@ class Database:
             canal=row[10] if len(row) > 10 and row[10] else WHATSAPP,
             external_id=row[11] if len(row) > 11 else None,
             handle=row[12] if len(row) > 12 else None,
+            tipo_cliente=row[13] if len(row) > 13 and row[13] else "b2c",
         )
 
     _CONTACT_SELECT = """
         SELECT id, phone, status, ia_ativa, created_at,
                push_name, handover_at, atendido_at, handover_motivo, session_state,
-               canal, external_id, handle
+               canal, external_id, handle, tipo_cliente
         FROM contatos
     """
 
@@ -376,6 +480,54 @@ class Database:
             self._logger.exception("Erro atualizando ia_ativa: %s", e)
             raise
 
+    def set_contact_status(self, contact_id: int, status: str) -> None:
+        """Update `contatos.status` (contact-interest-memory).
+
+        Validated against `CONTACT_STATUSES` in Python before touching the
+        DB — raises `ValueError` for anything outside the closed set, the
+        same style as other setters in this module (no DB `CHECK`
+        constraint).
+        """
+        if status not in CONTACT_STATUSES:
+            raise ValueError(
+                f"status inválido: {status!r} (esperado um de {sorted(CONTACT_STATUSES)})"
+            )
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE contatos SET status = %s WHERE id = %s",
+                        (status, contact_id),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro atualizando status: %s", e)
+            raise
+
+    def set_contact_tipo_cliente(self, contact_id: int, tipo_cliente: str) -> None:
+        """Update `contatos.tipo_cliente` (contact-segmentation-b2b-b2c).
+
+        Validated against `CONTACT_TIPO_CLIENTES` in Python before touching
+        the DB — raises `ValueError` for anything outside the closed set,
+        the same style as `set_contact_status`.
+        """
+        if tipo_cliente not in CONTACT_TIPO_CLIENTES:
+            raise ValueError(
+                f"tipo_cliente inválido: {tipo_cliente!r} "
+                f"(esperado um de {sorted(CONTACT_TIPO_CLIENTES)})"
+            )
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE contatos SET tipo_cliente = %s WHERE id = %s",
+                        (tipo_cliente, contact_id),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro atualizando tipo_cliente: %s", e)
+            raise
+
     def update_contact_last_inbound(
         self, contact_id: int, when: datetime | None = None
     ) -> None:
@@ -472,7 +624,8 @@ class Database:
         return """
             SELECT id, phone, push_name, handover_at, handover_motivo,
                    EXTRACT(EPOCH FROM (now() - handover_at)) / 60 AS minutes_waiting,
-                   prioridade, assumido_por, canal, external_id, handle, last_inbound_at
+                   prioridade, assumido_por, canal, external_id, handle, last_inbound_at,
+                   status, session_state
             FROM contatos
             WHERE handover_at IS NOT NULL AND atendido_at IS NULL
         """
@@ -491,6 +644,12 @@ class Database:
             external_id=r[9] if len(r) > 9 else None,
             handle=r[10] if len(r) > 10 else None,
             last_inbound_at=r[11] if len(r) > 11 else None,
+            # handover-summary-for-agent: appended at the end of `_waiting_select()`
+            # so any raw-SQL caller that still expects the original 12-column
+            # shape (`AND canal = ... AND external_id = ...` filters appended
+            # by `get_contact_waiting`/`get_long_wait_unnotified`) keeps working.
+            status=r[12] if len(r) > 12 else None,
+            session_state=self._parse_session_state(r[13]) if len(r) > 13 else None,
         )
 
     def get_waiting_contacts(self) -> List[WaitingContact]:
@@ -712,6 +871,29 @@ class Database:
                 )
                 return cur.fetchone() is not None
 
+    def pausar_bot(self, phone: str, *, canal: str | None = None) -> bool:
+        """Manually pause the bot for a contact outside the handover queue
+        (`admin-bot-pause`). Mirrors `reativar_bot`'s `(canal, external_id)`
+        resolution, but only flips `ia_ativa` — `bot_resume_at` is left
+        untouched (design.md, Decisão 2): a manual pause is indefinite, not
+        a handover with an automatic resume deadline, so
+        `process_auto_reactivations()`'s `bot_resume_at <= now()` sweep must
+        never pick these rows up on its own."""
+        canal = normalize_channel(canal)
+        self.init_pool()
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE contatos
+                    SET ia_ativa = FALSE
+                    WHERE canal = %s AND external_id = %s
+                    RETURNING id
+                    """,
+                    (canal, phone),
+                )
+                return cur.fetchone() is not None
+
     def mark_all_attended(
         self,
         reativar_bot: bool = False,
@@ -855,21 +1037,6 @@ class Database:
             self._logger.exception("Erro carregando histórico: %s", e)
             raise
 
-    def get_last_inbound_message(self, contact_id: int) -> str | None:
-        self.init_pool()
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT text FROM mensagens
-                    WHERE contact_id = %s AND direction = 'in'
-                    ORDER BY created_at DESC LIMIT 1
-                    """,
-                    (contact_id,),
-                )
-                row = cur.fetchone()
-                return row[0] if row else None
-
     def process_auto_reactivations(self) -> list[str]:
         """Re-enable bot for contacts past scheduled resume time.
 
@@ -967,7 +1134,7 @@ class Database:
                         """
                         SELECT id, phone, push_name, ia_ativa,
                                handover_at IS NOT NULL AND atendido_at IS NULL AS in_queue,
-                               canal, external_id, handle
+                               canal, external_id, handle, tipo_cliente
                         FROM contatos
                         WHERE phone LIKE %s OR external_id LIKE %s
                         ORDER BY created_at DESC LIMIT 5
@@ -981,9 +1148,9 @@ class Database:
                         """
                         SELECT id, phone, push_name, ia_ativa,
                                handover_at IS NOT NULL AND atendido_at IS NULL AS in_queue,
-                               canal, external_id, handle
+                               canal, external_id, handle, tipo_cliente
                         FROM contatos
-                        WHERE push_name ILIKE %s OR handle ILIKE %s
+                        WHERE unaccent(push_name) ILIKE %s OR unaccent(handle) ILIKE %s
                         ORDER BY created_at DESC LIMIT 5
                         """,
                         (term, term),
@@ -998,6 +1165,7 @@ class Database:
                         "canal": r[5],
                         "external_id": r[6],
                         "handle": r[7],
+                        "tipo_cliente": r[8],
                         "label": resolve_label(r[2], r[7], r[6] or r[1]),
                     }
                     for r in cur.fetchall()
@@ -1204,4 +1372,237 @@ class Database:
                     )
         except Exception as e:
             self._logger.exception("Erro buscando credencial de canal: %s", e)
+            raise
+
+    # -- product catalog cache (catalog-product-sync) ----------------------
+
+    def upsert_catalog_products(self, products: list[dict]) -> None:
+        """Upsert `produtos_catalogo` by `product_id`.
+
+        Called from `whatbot.main.sync_catalog()` right after
+        `EvolutionApiClient.fetch_catalog()`. Each `product` dict is expected
+        to already carry `product_id`, `nome`, `preco`, `disponivel` (the
+        shape `fetch_catalog()` returns) — `last_synced_at` is always bumped
+        to `now()` on every run that sees the product, whether or not its
+        other fields changed, so it reflects the most recent successful sync
+        (see design.md, Decisão 2).
+        """
+        if not products:
+            return
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    for product in products:
+                        cur.execute(
+                            """
+                            INSERT INTO produtos_catalogo
+                                (product_id, nome, preco, disponivel, last_synced_at)
+                            VALUES (%s, %s, %s, %s, now())
+                            ON CONFLICT (product_id) DO UPDATE
+                            SET nome = EXCLUDED.nome,
+                                preco = EXCLUDED.preco,
+                                disponivel = EXCLUDED.disponivel,
+                                last_synced_at = now()
+                            """,
+                            (
+                                product["product_id"],
+                                product.get("nome"),
+                                product.get("preco"),
+                                product.get("disponivel"),
+                            ),
+                        )
+        except Exception as e:
+            self._logger.exception("Erro sincronizando catálogo de produtos: %s", e)
+            raise
+
+    def resolve_catalog_items(self, product_ids: list[str]) -> list[dict]:
+        """Resolve `productId`/`retailerId` values to name/price/availability.
+
+        Used by `catalog-order-capture` (enriching a captured order) and by
+        `handover-summary-for-agent` (building the handover summary). An id
+        absent from the local cache is simply omitted from the result — never
+        raises (see spec "Item desconhecido não quebra a resolução dos
+        demais").
+        """
+        if not product_ids:
+            return []
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT product_id, nome, preco, disponivel
+                        FROM produtos_catalogo
+                        WHERE product_id = ANY(%s)
+                        """,
+                        (list(product_ids),),
+                    )
+                    return [
+                        {
+                            "product_id": r[0],
+                            "nome": r[1],
+                            "preco": r[2],
+                            "disponivel": r[3],
+                        }
+                        for r in cur.fetchall()
+                    ]
+        except Exception as e:
+            self._logger.exception("Erro resolvendo itens do catálogo: %s", e)
+            raise
+
+    # -- mass-broadcast campaign queue (campaign-csv-broadcast) -----------
+
+    _CAMPAIGN_MESSAGE_SELECT = """
+        SELECT id, lote, canal, external_id, mensagem, status,
+               tentativas, erro, criado_em, enviado_em
+        FROM disparo_mensagens
+    """
+
+    def _row_to_campaign_message(self, row) -> CampaignMessage:
+        return CampaignMessage(
+            id=row[0],
+            lote=row[1],
+            canal=row[2],
+            external_id=row[3],
+            mensagem=row[4],
+            status=row[5],
+            tentativas=row[6],
+            erro=row[7],
+            criado_em=row[8],
+            enviado_em=row[9],
+        )
+
+    def insert_campaign_message(
+        self, lote: str, canal: str, external_id: str, mensagem: str
+    ) -> int:
+        """Enqueue a single `pendente` row for `lote`. Called once per valid
+        CSV line by `whatbot.main.import_campaign`."""
+        canal = normalize_channel(canal)
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO disparo_mensagens (lote, canal, external_id, mensagem)
+                        VALUES (%s, %s, %s, %s)
+                        RETURNING id
+                        """,
+                        (lote, canal, external_id, mensagem),
+                    )
+                    return cur.fetchone()[0]
+        except Exception as e:
+            self._logger.exception("Erro inserindo mensagem de disparo: %s", e)
+            raise
+
+    def get_pending_campaign_messages(self, limit: int) -> list[CampaignMessage]:
+        """Up to `limit` `pendente` rows, oldest first — the batch a single
+        `send_campaign_queue` run processes (design.md, Decisão 2)."""
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        self._CAMPAIGN_MESSAGE_SELECT
+                        + " WHERE status = 'pendente' ORDER BY criado_em ASC LIMIT %s",
+                        (limit,),
+                    )
+                    return [self._row_to_campaign_message(r) for r in cur.fetchall()]
+        except Exception as e:
+            self._logger.exception("Erro buscando mensagens pendentes de disparo: %s", e)
+            raise
+
+    def mark_campaign_message_sent(self, message_id: int) -> None:
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE disparo_mensagens
+                        SET status = 'enviado', enviado_em = now()
+                        WHERE id = %s
+                        """,
+                        (message_id,),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro marcando mensagem de disparo como enviada: %s", e)
+            raise
+
+    def mark_campaign_message_retry(
+        self, message_id: int, tentativas: int, erro: str
+    ) -> None:
+        """Record a retryable failure: bump `tentativas`, keep `status =
+        'pendente'` for the next `send_campaign_queue` run."""
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE disparo_mensagens
+                        SET tentativas = %s, erro = %s
+                        WHERE id = %s
+                        """,
+                        (tentativas, erro, message_id),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro registrando nova tentativa de disparo: %s", e)
+            raise
+
+    def mark_campaign_message_failed(self, message_id: int, erro: str) -> None:
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE disparo_mensagens
+                        SET status = 'falha', erro = %s
+                        WHERE id = %s
+                        """,
+                        (erro, message_id),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro marcando mensagem de disparo como falha: %s", e)
+            raise
+
+    def mark_campaign_message_skipped(self, message_id: int) -> None:
+        """Contact has `ia_ativa = FALSE` at send time (design.md, Decisão 4)."""
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE disparo_mensagens SET status = 'pulado' WHERE id = %s",
+                        (message_id,),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro marcando mensagem de disparo como pulada: %s", e)
+            raise
+
+    def get_campaign_status(self, lote: str) -> dict:
+        """Count of rows per `status` for `lote` — feeds the admin
+        `campaign_status` command. Always includes every status in
+        `CAMPAIGN_MESSAGE_STATUSES`, zero-filled, even if `lote` has none."""
+        self.init_pool()
+        counts = {status: 0 for status in CAMPAIGN_MESSAGE_STATUSES}
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT status, COUNT(*) FROM disparo_mensagens
+                        WHERE lote = %s
+                        GROUP BY status
+                        """,
+                        (lote,),
+                    )
+                    for status, count in cur.fetchall():
+                        counts[status] = int(count)
+                    return counts
+        except Exception as e:
+            self._logger.exception("Erro buscando status do disparo: %s", e)
             raise

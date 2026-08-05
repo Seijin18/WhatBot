@@ -12,7 +12,7 @@ from .knowledge import get_knowledge_store
 from .knowledge_facts import get_knowledge_facts
 from .reply_composer import default_closing, get_reply_composer
 from .session_state import SessionState
-from .tools import buscar_faq, buscar_info_negocio, buscar_precos, listar_modalidades
+from .tools import buscar_faq, buscar_info_negocio, buscar_precos, listar_itens
 
 logger = logging.getLogger("whatbot.grounding")
 
@@ -78,8 +78,8 @@ _STOPWORDS = frozenset(
         "endereço",
         "associacao",
         "associação",
-        "modalidade",
-        "modalidades",
+        "item",
+        "itens",
         "atividade",
         "atividades",
         "oferece",
@@ -132,7 +132,7 @@ def _is_list_line(line: str) -> bool:
     return bool(stripped and _LIST_LINE.match(stripped))
 
 
-def _line_claims_modality(line: str) -> bool:
+def _line_claims_item(line: str) -> bool:
     stripped = _strip_list_marker(line)
     return bool(re.search(r"\*\*[^*]+\*\*|:\s*\S", stripped) or len(stripped) > 20)
 
@@ -167,7 +167,7 @@ def detect_hallucination(reply: str) -> bool:
     reply_norm = _norm(reply)
 
     for line in reply.splitlines():
-        if not _is_list_line(line) or not _line_claims_modality(line):
+        if not _is_list_line(line) or not _line_claims_item(line):
             continue
         line_norm = _norm(_strip_list_marker(line))
         significant = [
@@ -188,7 +188,7 @@ def detect_hallucination(reply: str) -> bool:
 
     if any(
         marker in reply_norm
-        for marker in ("modalidade", "atividade", "temos", "oferece", "oferecemos")
+        for marker in ("item", "atividade", "temos", "oferece", "oferecemos")
     ):
         # Only check the structured (list) part of the reply against the KB —
         # free-flowing conversational sentences naturally reword things (e.g.
@@ -232,14 +232,14 @@ def build_knowledge_reply(user_message: str, session: SessionState | None = None
     if any(
         token in norm
         for token in (
-            "modalidade",
-            "modalidades",
+            "item",
+            "itens",
             "atividade",
             "horario",
             "horário",
         )
     ):
-        listing = listar_modalidades()
+        listing = listar_itens()
         if listing:
             parts.append(listing)
 
@@ -251,7 +251,7 @@ def build_knowledge_reply(user_message: str, session: SessionState | None = None
                 parts.append(cleaned)
 
     if not parts:
-        listing = listar_modalidades()
+        listing = listar_itens()
         if listing:
             parts.append(listing)
 

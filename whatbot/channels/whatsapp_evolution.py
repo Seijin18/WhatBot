@@ -94,6 +94,103 @@ class EvolutionApiClient:
                 WHATSAPP, str(exc), retryable=_is_retryable(exc)
             ) from exc
 
+    def fetch_catalog(self) -> list[Dict[str, Any]]:
+        """Fetch the WhatsApp Business catalog (catalog-product-sync).
+
+        `POST /chat/fetchCatalogs/{instance}` is not officially documented by
+        Meta — it is Evolution API's reverse-engineering of Baileys' WhatsApp
+        Web catalog read (see `openspec/changes/catalog-product-sync/
+        proposal.md`, "Why"). This is a read, not a send: unlike `send_text`,
+        a failure is not wrapped in `ChannelError` (that type is the sending
+        contract) — it simply propagates as `requests.RequestException`, which
+        `whatbot.main.sync_catalog()` (the only caller) catches so a sync
+        failure never blocks customer traffic. Everything that can go wrong
+        while turning the response into `list[dict]` — HTTP error, transport
+        error, unexpected JSON shape — happens inside the same `try`, so this
+        promise actually holds (see critic feedback on catalog-product-sync:
+        the normalization step used to run outside the `try`, where a
+        non-dict raw item would raise `AttributeError` instead).
+
+        Returns a list already shaped for `Database.upsert_catalog_products`
+        (`product_id`, `nome`, `preco`, `disponivel`), normalized from the raw
+        catalog item fields Baileys exposes (`id`/`retailerId`, `name`,
+        `price`, `isHidden`) — the same `id` that shows up as `productId` on
+        `orderMessage` items (see `whatbot/webhook.py`). A malformed raw item
+        (not a dict, or with no recognizable id field) is logged as a warning
+        and dropped, not raised — one bad product in the response must never
+        cost every other valid product in the same batch (see
+        `_normalize_catalog_items`).
+        """
+        url = f"{self.base_url}/chat/fetchCatalogs/{self.instance_name}"
+        headers = {
+            "apikey": self.api_key,
+            "Content-Type": "application/json",
+        }
+        try:
+            response = requests.post(url, headers=headers, json={}, timeout=10)
+            if not response.ok:
+                self._logger.error(
+                    "Evolution API %s: %s",
+                    response.status_code,
+                    response.text[:500],
+                )
+            response.raise_for_status()
+            raw_items = response.json()
+            if isinstance(raw_items, dict):
+                raw_items = raw_items.get("catalog") or raw_items.get("products") or []
+            return self._normalize_catalog_items(raw_items)
+        except requests.RequestException as exc:
+            self._logger.exception("Erro buscando catálogo via Evolution API: %s", exc)
+            raise
+
+    def _normalize_catalog_items(self, raw_items: Any) -> list[Dict[str, Any]]:
+        """Map raw catalog entries to `produtos_catalogo` shape, dropping bad ones.
+
+        A single malformed entry — not a `dict`, or missing every field this
+        integration recognizes as a product id (`id`/`retailerId`/
+        `productId`) — must never abort the whole sync batch nor keep failing
+        on every run just because one remote product is malformed: it is
+        logged as a warning and skipped, every other valid product in the
+        same response is still returned and persisted.
+        """
+        products: list[Dict[str, Any]] = []
+        for item in raw_items or []:
+            if not isinstance(item, dict) or not item:
+                self._logger.warning(
+                    "Item de catálogo ignorado: formato inesperado (%r)", item
+                )
+                continue
+            product = self._to_catalog_product(item)
+            if not product["product_id"]:
+                self._logger.warning(
+                    "Item de catálogo ignorado: sem id/retailerId/productId "
+                    "reconhecível (%r)",
+                    item,
+                )
+                continue
+            products.append(product)
+        return products
+
+    @staticmethod
+    def _to_catalog_product(item: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize one raw catalog item.
+
+        ASSUNÇÃO NÃO VALIDADA (ver proposal.md "Why" — endpoint não
+        documentado oficialmente pela Meta): `preco` é copiado de `price`
+        sem qualquer conversão de escala. Não há confirmação, sem uma
+        instância real da Evolution API para inspecionar, de que `price`
+        venha em unidade decimal (ex.: 49.90) em vez da menor unidade da
+        moeda (centavos, ex.: 4990) — revisar esta suposição assim que o job
+        rodar contra um catálogo real (ver tasks.md, nota da tarefa 1.1).
+        """
+        product_id = item.get("id") or item.get("retailerId") or item.get("productId")
+        return {
+            "product_id": str(product_id) if product_id else None,
+            "nome": item.get("name") or item.get("nome"),
+            "preco": item.get("price", item.get("preco")),
+            "disponivel": not bool(item.get("isHidden", False)),
+        }
+
 
 # Backward-compatible alias for the rest of the application.
 WhatsAppClient = EvolutionApiClient

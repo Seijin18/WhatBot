@@ -11,23 +11,23 @@ from tests.kb_fixtures import (
 
 
 class TestKnowledgeParser(unittest.TestCase):
-    def test_parse_modalidades_and_faq(self):
+    def test_parse_itens_and_faq(self):
         base = _parse_markdown(CLASS_SCHEDULE_KB)
 
-        self.assertIn("yoga", base.modalidades)
+        self.assertIn("yoga", base.itens)
         self.assertEqual(
-            base.modalidades["yoga"].campos["Horários"],
+            base.itens["yoga"].campos["Horários"],
             "Quartas-feiras, das 19:30 às 20:30",
         )
-        self.assertIn("judo infantil", base.modalidades)
+        self.assertIn("judo infantil", base.itens)
         self.assertTrue(base.faq)
         self.assertIn("sobre", base.secoes)
 
     def test_store_reload_on_access(self):
         store = load_class_schedule_kb()
-        modalidades = store.listar_modalidades()
-        self.assertIn("Yoga", modalidades)
-        self.assertIn("Judô infantil", modalidades)
+        itens = store.listar_itens()
+        self.assertIn("Yoga", itens)
+        self.assertIn("Judô infantil", itens)
 
     def test_buscar_horarios(self):
         store = load_class_schedule_kb()
@@ -52,36 +52,36 @@ class TestKnowledgeParser(unittest.TestCase):
         self.assertIn("judô", res.lower())
         self.assertIn("yoga", res.lower())
 
-    def test_parse_catalog_without_modalidades(self):
-        """A KB with no `## Modalidades` section (product catalog, not
-        class schedules) must still parse cleanly — `modalidades` stays
-        empty rather than erroring, and `Preços`/`Como comprar e pagamento`
-        parse as plain sections."""
+    def test_parse_catalog_without_itens(self):
+        """A KB with no `## Itens` section (product catalog, not class
+        schedules) must still parse cleanly — `itens` stays empty rather
+        than erroring, and `Preços`/`Como comprar e pagamento` parse as
+        plain sections."""
         base = _parse_markdown(CATALOG_KB)
-        self.assertEqual(base.modalidades, {})
+        self.assertEqual(base.itens, {})
         self.assertIn("precos", base.secoes)
         self.assertIn("como comprar e pagamento", base.secoes)
         self.assertTrue(base.faq)
 
-    def test_buscar_precos_catalog_has_no_modalidade_heading(self):
-        """`buscar_precos()` must not print the per-modalidade table header
-        when there are no modalidades — it used to appear with nothing
-        under it for a catalog-style business (see
-        docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.1)."""
+    def test_buscar_precos_catalog_has_no_item_heading(self):
+        """`buscar_precos()` must not print the per-item table header when
+        there are no itens — it used to appear with nothing under it for a
+        catalog-style business (see docs/REVISAO_CAMADA_CONVERSACIONAL.md,
+        P1.1)."""
         store = load_catalog_kb()
         res = store.buscar_precos(None)
-        self.assertNotIn("Tabela de preços por modalidade", res)
+        self.assertNotIn("Tabela de preços por item", res)
         self.assertIn("R$ 39,90", res)
 
-    def test_listar_modalidades_falls_back_to_precos_for_catalog(self):
-        """A catalog-style business has no `## Modalidades` section, so the
+    def test_listar_itens_falls_back_to_precos_for_catalog(self):
+        """A catalog-style business has no `## Itens` section, so the
         "what do you have?" answer must fall back to the price table
-        instead of "Nenhuma modalidade cadastrada no momento." — that
+        instead of "Nenhum item cadastrado no momento." — that
         placeholder used to be sent to the customer verbatim (see
         docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.1/P1.3)."""
         store = load_catalog_kb()
-        res = store.listar_modalidades()
-        self.assertNotIn("Nenhuma modalidade cadastrada", res)
+        res = store.listar_itens()
+        self.assertNotIn("Nenhum item cadastrado", res)
         self.assertIn("R$ 39,90", res)
 
     def test_buscar_faq_uses_real_section_heading(self):
@@ -99,8 +99,8 @@ class TestAgentTools(unittest.TestCase):
     def setUp(self):
         load_class_schedule_kb()
 
-    def test_listar_modalidades_tool(self):
-        res = tools.listar_modalidades()
+    def test_listar_itens_tool(self):
+        res = tools.listar_itens()
         self.assertIn("Yoga", res)
         self.assertIn("Judô", res)
 

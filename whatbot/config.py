@@ -89,6 +89,17 @@ def get_timezone() -> str:
 
 
 AUTO_REACTIVATE_HOURS = int(os.getenv("AUTO_REACTIVATE_HOURS", "24"))
+
+# campaign-csv-broadcast: três camadas independentes de limite de taxa
+# (design.md, Decisão 2) — tamanho do lote por execução do worker, pausa
+# entre envios dentro do lote, e o intervalo do cron do Windmill (configurado
+# fora do código, na UI, ver windmill/f/whatbot/send_campaign_queue.py e
+# tasks.md 3.8). Lidos por `whatbot/main.py::send_campaign_queue` via estes
+# nomes (não via `os.getenv` direto), para que os testes possam sobrescrever
+# por caso com `patch.object(main_mod, "CAMPAIGN_BATCH_SIZE", N)`.
+CAMPAIGN_BATCH_SIZE = int(os.getenv("CAMPAIGN_BATCH_SIZE", "20"))
+CAMPAIGN_MAX_RETRIES = int(os.getenv("CAMPAIGN_MAX_RETRIES", "3"))
+CAMPAIGN_SEND_INTERVAL_SECONDS = int(os.getenv("CAMPAIGN_SEND_INTERVAL_SECONDS", "3"))
 DEFAULT_TEST_PHONE = os.getenv("DEFAULT_TEST_PHONE", "5511999999999")
 FALLBACK_SIMULATE_PHONE = "5511999999999"
 ENV_BUSINESS_PHONE = "BUSINESS_PHONE"

@@ -7,7 +7,44 @@ from typing import Any, Dict, Optional
 from .channels import WHATSAPP, InboundMessage
 
 
-def _extract_text(message: Dict[str, Any]) -> str:
+def _extract_order(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract a WhatsApp catalog order from an inbound message, if present.
+
+    See openspec/changes/catalog-order-capture/design.md (Decisão 2):
+    `items_identifiable` is derived from data presence (a `productId` on
+    every item), not from detecting the sending platform directly — Android
+    orders typically carry identifiable items, iOS orders typically don't
+    (evolution-foundation/evolution-api#1819), but this stays correct even
+    if the underlying cause changes in the future.
+    """
+    if not message or "orderMessage" not in message:
+        return None
+    # `orderMessage` present but empty/`None` (e.g. `{"orderMessage": {}}`)
+    # is still a real order, just with no data — must not be treated as
+    # "no order" (which would fall the message back into the original
+    # silent-drop bug this change fixes).
+    order_message = message.get("orderMessage") or {}
+    items = order_message.get("items") or []
+    items_identifiable = bool(items) and all(
+        item.get("productId") for item in items
+    )
+    return {
+        "order_id": order_message.get("orderId"),
+        "item_count": order_message.get("itemCount", len(items)),
+        "order_title": order_message.get("orderTitle"),
+        "items": items,
+        "items_identifiable": items_identifiable,
+    }
+
+
+def _extract_text(
+    message: Dict[str, Any], order: Optional[Dict[str, Any]] = None
+) -> str:
+    """`order`, when the caller already computed it (`parse_evolution_payload`),
+    is reused instead of recomputing via `_extract_order(message)` — avoids
+    parsing the same `orderMessage` twice per payload. Callers that don't
+    care about orders (e.g. `parse_outgoing_staff_message`) can omit it;
+    it's derived from `message` on demand."""
     if not message:
         return ""
     if conversation := message.get("conversation"):
@@ -24,6 +61,15 @@ def _extract_text(message: Dict[str, Any]) -> str:
         title = list_response.get("title", "")
         description = list_response.get("description", "")
         return f"{title} {description}".strip()
+    if order is None:
+        order = _extract_order(message)
+    if order:
+        # Never empty: an `orderMessage` must never be silently dropped by
+        # the `if not text: return None` guard in `parse_evolution_payload`
+        # (openspec/changes/catalog-order-capture/proposal.md, "Why").
+        if order["items_identifiable"]:
+            return f"[pedido do catálogo] {order['item_count']} item(ns)"
+        return "[pedido do catálogo] itens não identificados"
     return ""
 
 
@@ -83,7 +129,9 @@ def parse_evolution_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]
     if not remote_jid or remote_jid.endswith("@g.us"):
         return None
 
-    text = _extract_text(data.get("message") or {})
+    raw_message = data.get("message") or {}
+    order = _extract_order(raw_message)
+    text = _extract_text(raw_message, order=order)
     if not text:
         return None
 
@@ -100,4 +148,9 @@ def parse_evolution_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]
         **message.to_payload(),
         "instance": payload.get("instance"),
         "event": payload.get("event"),
+        # `order` (a dict, `None` when this isn't a catalog order) is a
+        # deliberate free-standing key on this returned dict, not a field on
+        # `InboundMessage` — see
+        # openspec/changes/catalog-order-capture/design.md, Decisão 1.
+        "order": order,
     }

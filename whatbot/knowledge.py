@@ -11,12 +11,12 @@ from typing import Dict, List, Optional
 
 
 @dataclass
-class Modalidade:
+class Item:
     nome: str
     campos: Dict[str, str] = field(default_factory=dict)
 
     def as_text(self) -> str:
-        lines = [f"Modalidade: {self.nome}"]
+        lines = [f"Item: {self.nome}"]
         for key, value in self.campos.items():
             lines.append(f"{key}: {value}")
         return "\n".join(lines)
@@ -26,12 +26,12 @@ class Modalidade:
 class KnowledgeBase:
     titulo: str
     secoes: Dict[str, str]
-    modalidades: Dict[str, Modalidade]
+    itens: Dict[str, Item]
     faq: Dict[str, str]
     secao_titulos: Dict[str, str] = field(default_factory=dict)
 
-    def listar_modalidades(self) -> List[str]:
-        return sorted(self.modalidades.keys())
+    def listar_itens(self) -> List[str]:
+        return sorted(self.itens.keys())
 
     def titulo_secao(self, key: str) -> str:
         """Original heading text for a section (e.g. "Como comprar e pagamento"),
@@ -110,27 +110,27 @@ def _parse_markdown(text: str) -> KnowledgeBase:
 
     secoes: Dict[str, str] = {}
     secao_titulos: Dict[str, str] = {}
-    modalidades: Dict[str, Modalidade] = {}
+    itens: Dict[str, Item] = {}
     faq: Dict[str, str] = {}
 
     current_h2: Optional[str] = None
     current_h3: Optional[str] = None
     buffer: List[str] = []
-    modalidade_buffer: List[str] = []
+    item_buffer: List[str] = []
 
     def flush_section() -> None:
-        nonlocal buffer, current_h2, current_h3, modalidade_buffer
+        nonlocal buffer, current_h2, current_h3, item_buffer
         if not current_h2:
             buffer = []
-            modalidade_buffer = []
+            item_buffer = []
             return
 
         norm_h2 = _normalize(current_h2)
         content = "\n".join(buffer).strip()
 
-        if norm_h2 == "modalidades" and current_h3:
-            campos = _parse_bullet_fields(modalidade_buffer)
-            modalidades[_normalize(current_h3)] = Modalidade(
+        if norm_h2 == "itens" and current_h3:
+            campos = _parse_bullet_fields(item_buffer)
+            itens[_normalize(current_h3)] = Item(
                 nome=current_h3, campos=campos
             )
         elif norm_h2 == "faq" and current_h3:
@@ -140,7 +140,7 @@ def _parse_markdown(text: str) -> KnowledgeBase:
             secao_titulos[norm_h2] = current_h2
 
         buffer = []
-        modalidade_buffer = []
+        item_buffer = []
 
     for line in lines[1:]:
         if line.startswith("## "):
@@ -153,8 +153,8 @@ def _parse_markdown(text: str) -> KnowledgeBase:
             current_h3 = line[4:].strip()
             continue
 
-        if current_h2 and _normalize(current_h2) == "modalidades" and current_h3:
-            modalidade_buffer.append(line)
+        if current_h2 and _normalize(current_h2) == "itens" and current_h3:
+            item_buffer.append(line)
         else:
             buffer.append(line)
 
@@ -162,7 +162,7 @@ def _parse_markdown(text: str) -> KnowledgeBase:
     return KnowledgeBase(
         titulo=titulo,
         secoes=secoes,
-        modalidades=modalidades,
+        itens=itens,
         faq=faq,
         secao_titulos=secao_titulos,
     )
@@ -228,43 +228,43 @@ class KnowledgeStore:
             return self.reload()
         return self._base
 
-    def _match_modalidade(self, modalidade: str) -> Optional[Modalidade]:
+    def _match_item(self, item: str) -> Optional[Item]:
         base = self.get()
-        query = _normalize(modalidade)
-        if query in base.modalidades:
-            return base.modalidades[query]
-        for key, item in base.modalidades.items():
+        query = _normalize(item)
+        if query in base.itens:
+            return base.itens[query]
+        for key, candidate in base.itens.items():
             if query in key or key in query:
-                return item
-            if query in _normalize(item.nome):
-                return item
+                return candidate
+            if query in _normalize(candidate.nome):
+                return candidate
         return None
 
-    def match_modalidades(self, text: str) -> List[str]:
-        from .knowledge_facts import match_modalidades_in_text
+    def match_items(self, text: str) -> List[str]:
+        from .knowledge_facts import match_items_in_text
 
-        return match_modalidades_in_text(text, self.get())
+        return match_items_in_text(text, self.get())
 
-    def listar_modalidades(self) -> str:
+    def listar_itens(self) -> str:
         """"What do you have?" answer. A class-schedule business (with a
-        `## Modalidades` section) gets that listing; a catalog-style
-        business has no such section, so this falls back to the price
-        table instead of a bare "Nenhuma modalidade cadastrada no momento."
-        — that fallback string used to be sent to customers verbatim
-        whenever this path was reached for a business without modalidades
+        `## Itens` section) gets that listing; a catalog-style business has
+        no such section, so this falls back to the price table instead of
+        a bare "Nenhum item cadastrado no momento." — that fallback string
+        used to be sent to customers verbatim whenever this path was
+        reached for a business without itens
         (docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.1/P1.3)."""
         base = self.get()
-        if not base.modalidades:
+        if not base.itens:
             return self.buscar_precos()
-        lines = ["Modalidades disponíveis:"]
-        for item in base.modalidades.values():
+        lines = ["Itens disponíveis:"]
+        for item in base.itens.values():
             horarios = item.campos.get("Horários", "consultar atendimento")
             preco = item.campos.get("Preço mensal", "consultar atendimento")
             lines.append(f"- {item.nome}: {horarios} | {preco}")
         return "\n".join(lines)
 
-    def registered_modalidade_names(self) -> List[str]:
-        return [item.nome for item in self.get().modalidades.values()]
+    def registered_item_names(self) -> List[str]:
+        return [item.nome for item in self.get().itens.values()]
 
     def business_label(self) -> str:
         """Short business name from the knowledge file's title."""
@@ -309,20 +309,20 @@ class KnowledgeStore:
         contato = base.secoes.get("endereco e contato")
         if contato:
             parts.extend(["", f"{base.titulo_secao('endereco e contato')}:", contato])
-        # Only inject this block (and its "nunca cite outras" warning) when
-        # the KB actually has a `## Modalidades` section — otherwise this
-        # header used to appear in every single prompt with nothing under
-        # it, an unconditional domain-specific string bleeding into
-        # businesses that don't model themselves as class/schedule
-        # "modalidades" (docs/REVISAO_CAMADA_CONVERSACIONAL.md, P0.1/P1.8).
-        if base.modalidades:
+        # Only inject this block (and its "nunca cite outros" warning) when
+        # the KB actually has a `## Itens` section — otherwise this header
+        # used to appear in every single prompt with nothing under it, an
+        # unconditional domain-specific string bleeding into businesses
+        # that don't model themselves as a set of registered "itens"
+        # (docs/REVISAO_CAMADA_CONVERSACIONAL.md, P0.1/P1.8).
+        if base.itens:
             parts.extend(
                 [
                     "",
-                    "MODALIDADES CADASTRADAS (somente estas existem — nunca cite outras):",
+                    "ITENS CADASTRADOS (somente estes existem — nunca cite outros):",
                 ]
             )
-            for item in base.modalidades.values():
+            for item in base.itens.values():
                 parts.extend(["", item.as_text()])
         precos = base.secoes.get("precos")
         if precos:
@@ -339,32 +339,32 @@ class KnowledgeStore:
                 parts.append(f"- {question}: {answer}")
         return "\n".join(parts)
 
-    def buscar_horarios(self, modalidade: str) -> str:
-        item = self._match_modalidade(modalidade)
-        if item is None:
+    def buscar_horarios(self, item: str) -> str:
+        found = self._match_item(item)
+        if found is None:
             return (
-                f"Modalidade '{modalidade}' não encontrada. "
-                f"Disponíveis: {', '.join(self.get().listar_modalidades())}."
+                f"Item '{item}' não encontrado. "
+                f"Disponíveis: {', '.join(self.get().listar_itens())}."
             )
-        horarios = item.campos.get("Horários")
+        horarios = found.campos.get("Horários")
         if horarios:
-            extra = item.campos.get("Observações")
-            text = f"{item.nome}: {horarios}"
+            extra = found.campos.get("Observações")
+            text = f"{found.nome}: {horarios}"
             if extra:
                 text += f". Observações: {extra}"
             return text
-        return f"Horários de {item.nome} não informados. Consulte o atendimento."
+        return f"Horários de {found.nome} não informados. Consulte o atendimento."
 
-    def buscar_precos(self, modalidade: str | None = None) -> str:
+    def buscar_precos(self, item: str | None = None) -> str:
         base = self.get()
-        if modalidade:
-            item = self._match_modalidade(modalidade)
-            if item is None:
-                return f"Modalidade '{modalidade}' não encontrada."
-            mensal = item.campos.get("Preço mensal", "Preço mensal não informado.")
-            semestral = item.campos.get("Preço semestral")
-            desconto = item.campos.get("Desconto")
-            parts = [f"{item.nome}: {mensal}"]
+        if item:
+            found = self._match_item(item)
+            if found is None:
+                return f"Item '{item}' não encontrado."
+            mensal = found.campos.get("Preço mensal", "Preço mensal não informado.")
+            semestral = found.campos.get("Preço semestral")
+            desconto = found.campos.get("Desconto")
+            parts = [f"{found.nome}: {mensal}"]
             if semestral:
                 parts.append(f"Semestral: {semestral}")
             if desconto:
@@ -374,16 +374,16 @@ class KnowledgeStore:
         como_comprar = base.secoes.get("como comprar e pagamento", "")
         precos = base.secoes.get("precos", "")
         lines: list[str] = []
-        # Only businesses with a `## Modalidades` section (class schedules,
+        # Only businesses with a `## Itens` section (class schedules,
         # service tiers) get this per-item table — a product catalog
         # without that structure previously still got the heading with
         # nothing under it (docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.1).
-        if base.modalidades:
-            lines.append("Tabela de preços por modalidade:")
-            for item in base.modalidades.values():
-                mensal = item.campos.get("Preço mensal", "consultar atendimento")
-                semestral = item.campos.get("Preço semestral")
-                entry = f"- {item.nome}: {mensal}"
+        if base.itens:
+            lines.append("Tabela de preços por item:")
+            for candidate in base.itens.values():
+                mensal = candidate.campos.get("Preço mensal", "consultar atendimento")
+                semestral = candidate.campos.get("Preço semestral")
+                entry = f"- {candidate.nome}: {mensal}"
                 if semestral:
                     entry += f" | {semestral}"
                 lines.append(entry)
@@ -412,8 +412,8 @@ class KnowledgeStore:
             if contato:
                 return f"{base.titulo_secao('endereco e contato')}:\n{contato}"
 
-        if query in {"modalidade", "modalidades", "atividades", "aulas"}:
-            return self.listar_modalidades()
+        if query in {"item", "itens", "atividades", "aulas"}:
+            return self.listar_itens()
 
         # Keyword search across sections
         hits: List[str] = []

@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import os
+import time
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Any
 
 from .config import (
     SYSTEM_PROMPTS,
+    CAMPAIGN_BATCH_SIZE,
+    CAMPAIGN_MAX_RETRIES,
+    CAMPAIGN_SEND_INTERVAL_SECONDS,
     ENV_DB_DSN,
     ENV_EVOLUTION_API_KEY,
     ENV_EVOLUTION_API_INSTANCE_NAME,
@@ -28,6 +34,7 @@ from .channels import (
     EvolutionApiClient,
     UnknownChannelError,
     normalize_channel,
+    send_to_contact,
     validate_channel,
 )
 from .channels.instagram import InstagramClient, instagram_last_inbound_lookup
@@ -44,7 +51,12 @@ from .fallback import build_knowledge_fallback, trim_history_for_chat
 from .grounding import ensure_grounded_reply
 from .intent_router import route_intent
 from .prompt_builder import build_enriched_system_prompt
-from .session_state import SessionState, history_summary, update_session_state
+from .session_state import (
+    SessionState,
+    history_summary,
+    next_status,
+    update_session_state,
+)
 from .webhook import parse_evolution_payload, parse_outgoing_staff_message
 from .admin import (
     SIMULATE_HISTORY_LIMIT,
@@ -218,7 +230,22 @@ def run_admin_simulation(
         history_override=history_override,
         session_override=session_override,
     )
-    reply = result.get("model_reply") or result.get("message") or str(result)
+    # `customer_reply_text` is the normalized field every reply-producing
+    # branch of `process_customer_message`/`executar_handover_para_secretaria`
+    # fills in with exactly what a real customer would have seen this turn —
+    # this function only decorates it, it never has to know which internal
+    # branch produced it. `message` remains as a fallback for branches that
+    # never generate customer-facing text at all (e.g. the `ia_ativa=False`
+    # early return, which is informational to the admin, not a reply).
+    # `str(result)` was removed on purpose: it used to leak the raw internal
+    # result dict straight to WhatsApp whenever a branch didn't populate
+    # either key (found via a real handover-in-simulation turn that had
+    # neither `model_reply` nor `message` — see git history for the report).
+    reply = (
+        result.get("customer_reply_text")
+        or result.get("message")
+        or "(sem texto de resposta ao cliente neste turno)"
+    )
     if result.get("handed_to_human"):
         reply = (
             f"{reply}\n\n_(Handover simulado — o bot pararia de responder a este cliente.)_"
@@ -287,7 +314,14 @@ def _continue_admin_simulation(
     # return, fall back to the previous state so memory simply doesn't
     # advance instead of being wiped.
     new_session_state = result.get("session_state") or state.get("session_state") or {}
-    reply_text = result.get("model_reply") or result.get("message") or ""
+    # Same normalized field `run_admin_simulation` uses to decorate the reply
+    # sent to the admin — without it, a turn that ended in handover (no
+    # `model_reply`) used to drop out of the simulated conversation's
+    # history entirely (`reply_text = ""`), silently losing that turn's
+    # content for the LLM context on the next message.
+    reply_text = (
+        result.get("customer_reply_text") or result.get("message") or ""
+    )
     new_history = (
         [{"direction": "out", "text": reply_text}, {"direction": "in", "text": text}]
         + (state.get("history") or [])
@@ -316,6 +350,232 @@ def check_queue(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     return {"ok": True, **run_periodic_queue_checks(_db, _router)}
 
 
+def sync_catalog() -> Dict[str, Any]:
+    """Scheduled Windmill job: refresh `produtos_catalogo` from the WhatsApp
+    Business catalog (catalog-product-sync).
+
+    Delegates to `EvolutionApiClient.fetch_catalog()` + `Database.
+    upsert_catalog_products()`. Neither call is allowed to raise out of this
+    function: a failure fetching the remote catalog *or* persisting it
+    locally is logged and reported in the return value only — the local
+    cache keeps whatever the last successful sync wrote, and no customer
+    message is ever blocked waiting on this job (see design.md, Decisão 2,
+    and spec "Catálogo sincronizado periodicamente", cenário "Falha de
+    sincronização não derruba o sistema"). `upsert_catalog_products` used to
+    run outside any `try/except` here — a single malformed row (e.g.
+    `product_id=None`) would violate the `PRIMARY KEY NOT NULL` constraint,
+    roll back the whole batch and propagate uncaught, contradicting this very
+    docstring (see critic feedback on catalog-product-sync).
+    """
+    try:
+        _init_infra()
+    except Exception as e:
+        logger.exception("Erro inicializando infra: %s", e)
+        return {"ok": False, "error": "infra_init_failed", "detail": str(e)}
+    try:
+        products = _router.client_for(WHATSAPP).fetch_catalog()
+    except Exception as e:
+        logger.exception("Erro buscando catálogo remoto; cache local mantido: %s", e)
+        return {"ok": False, "error": "fetch_catalog_failed", "detail": str(e)}
+    try:
+        _db.upsert_catalog_products(products)
+    except Exception as e:
+        logger.exception(
+            "Erro salvando catálogo local; cache mantido no estado anterior: %s", e
+        )
+        return {"ok": False, "error": "upsert_failed", "detail": str(e)}
+    return {"ok": True, "synced": len(products)}
+
+
+def _normalize_campaign_phone(raw: str) -> str | None:
+    """Normalize a CSV `telefone` cell into a WhatsApp-shaped external id, or
+    `None` if it doesn't normalize into a plausible phone number.
+
+    Same digit-count bounds as `contact_resolver.extract_phone_from_text`
+    (10-15 digits, DDI+DDD+número) — `normalize_phone` alone only strips
+    non-digits, it does not reject something that is clearly not a phone
+    number (e.g. empty, or a handful of stray digits).
+    """
+    digits = normalize_phone(raw or "")
+    if 10 <= len(digits) <= 15:
+        return digits
+    return None
+
+
+def import_campaign(csv_content: str, lote: str) -> Dict[str, Any]:
+    """Synchronous Windmill job: import a mass-broadcast CSV
+    (campaign-csv-broadcast).
+
+    Parses `csv_content` with the standard-library `csv` module (columns
+    `telefone`/`mensagem` required, `tipo_cliente` optional) and enqueues one
+    `disparo_mensagens` row per valid line as `pendente` — the scheduled
+    `send_campaign_queue()` worker drains it later, at a controlled pace (see
+    design.md, Decisão 3: import and send are deliberately separate jobs).
+
+    An invalid line (telefone not normalizable, mensagem empty) is reported
+    in the returned `erros` list (line number + reason) without failing the
+    rest of the batch (Requirement "Importação valida linha a linha sem
+    falhar o lote inteiro"). `tipo_cliente`, when present and one of
+    `Database.CONTACT_TIPO_CLIENTES`, is applied best-effort to a contact
+    that already exists for that phone — never fails the line, whether the
+    contact doesn't exist yet or the value itself is invalid.
+    """
+    try:
+        _init_infra()
+    except Exception as e:
+        logger.exception("Erro inicializando infra: %s", e)
+        return {"ok": False, "error": "infra_init_failed", "detail": str(e)}
+
+    reader = csv.DictReader(io.StringIO(csv_content))
+    fieldnames = reader.fieldnames or []
+    if "telefone" not in fieldnames or "mensagem" not in fieldnames:
+        return {
+            "ok": False,
+            "error": "missing_columns",
+            "detail": "CSV precisa das colunas 'telefone' e 'mensagem'",
+        }
+
+    enfileiradas = 0
+    erros: list[dict] = []
+    # Header is line 1; `csv.DictReader` yields the first data row as line 2.
+    for line_number, row in enumerate(reader, start=2):
+        raw_phone = (row.get("telefone") or "").strip()
+        mensagem = (row.get("mensagem") or "").strip()
+        phone = _normalize_campaign_phone(raw_phone)
+        if phone is None:
+            erros.append({"linha": line_number, "motivo": "telefone inválido"})
+            continue
+        if not mensagem:
+            erros.append({"linha": line_number, "motivo": "mensagem vazia"})
+            continue
+
+        try:
+            _db.insert_campaign_message(lote, WHATSAPP, phone, mensagem)
+            enfileiradas += 1
+        except Exception as e:
+            logger.exception(
+                "Erro inserindo linha %s do CSV de campanha: %s", line_number, e
+            )
+            erros.append({"linha": line_number, "motivo": "erro ao gravar no banco"})
+            continue
+
+        tipo_cliente = (row.get("tipo_cliente") or "").strip().lower()
+        if tipo_cliente:
+            try:
+                contact = _db.get_contact_by_phone(phone, canal=WHATSAPP)
+                if contact is not None:
+                    _db.set_contact_tipo_cliente(contact.id, tipo_cliente)
+            except ValueError:
+                # tipo_cliente fora do conjunto válido (contact-segmentation-
+                # b2b-b2c): ignora só a coluna, a linha já foi enfileirada
+                # normalmente (tasks.md 2.4).
+                logger.warning(
+                    "tipo_cliente inválido na linha %s do CSV de campanha: %r",
+                    line_number,
+                    tipo_cliente,
+                )
+            except Exception:
+                logger.exception(
+                    "Falha ao atualizar tipo_cliente na linha %s do CSV de campanha",
+                    line_number,
+                )
+
+    return {"ok": True, "lote": lote, "enfileiradas": enfileiradas, "erros": erros}
+
+
+def send_campaign_queue() -> Dict[str, Any]:
+    """Scheduled Windmill job: send pending `disparo_mensagens` rows, rate
+    limited (campaign-csv-broadcast).
+
+    Pulls up to `CAMPAIGN_BATCH_SIZE` `pendente` rows, oldest first. A
+    contact with `ia_ativa = FALSE` at send time (handover in progress, or
+    manually paused) is skipped, never sent to (design.md, Decisão 4 — the
+    check happens here, at send time, not at import time). Delivery goes
+    through `whatbot/channels/router.py::send_to_contact` — the only
+    outbound boundary in the project (`openspec/project.md`, "Camadas").
+
+    Fail-closed on the `ia_ativa` check itself: if `get_contact_by_phone`
+    raises (e.g. a transient Postgres error), the row is neither sent nor
+    skipped — it stays `pendente` for the next run, `tentativas` untouched
+    (this is an infra failure, not a delivery attempt). Defaulting to "send
+    anyway" here would defeat the very point of Decisão 4 — a contact in
+    active handover or manually paused could receive a campaign message
+    exactly when the DB is too flaky to tell.
+
+    `ChannelError(retryable=True)` under `CAMPAIGN_MAX_RETRIES` bumps
+    `tentativas` and stays `pendente` for a future run; exhausted retries or
+    a non-retryable error mark the row `falha` (the latter without consuming
+    an extra attempt). `time.sleep(CAMPAIGN_SEND_INTERVAL_SECONDS)` paces
+    every processed row within this run (sent, skipped, or left pendente
+    after a lookup failure) — never after the last one.
+    """
+    try:
+        _init_infra()
+    except Exception as e:
+        logger.exception("Erro inicializando infra: %s", e)
+        return {"ok": False, "error": "infra_init_failed", "detail": str(e)}
+
+    messages = _db.get_pending_campaign_messages(CAMPAIGN_BATCH_SIZE)
+    counters = {"enviado": 0, "falha": 0, "pulado": 0, "pendente": 0}
+
+    for index, message in enumerate(messages):
+        lookup_failed = False
+        try:
+            contact = _db.get_contact_by_phone(message.external_id, canal=message.canal)
+        except Exception as e:
+            logger.exception(
+                "Erro buscando contato %s do disparo #%s; mantendo pendente sem "
+                "enviar (fail-closed — não dá para checar ia_ativa, ver "
+                "design.md Decisão 4)",
+                message.external_id,
+                message.id,
+            )
+            contact = None
+            lookup_failed = True
+            lookup_error = str(e)
+
+        if lookup_failed:
+            # Não conta como tentativa de envio: é falha de infraestrutura na
+            # checagem de ia_ativa, não uma tentativa de entrega que falhou.
+            _db.mark_campaign_message_retry(message.id, message.tentativas, lookup_error)
+            counters["pendente"] += 1
+        elif contact is not None and not contact.ia_ativa:
+            _db.mark_campaign_message_skipped(message.id)
+            counters["pulado"] += 1
+        else:
+            try:
+                send_to_contact(
+                    _router,
+                    message.external_id,
+                    message.mensagem,
+                    canal=message.canal,
+                    source="campaign",
+                    contact_id=contact.id if contact is not None else None,
+                )
+                _db.mark_campaign_message_sent(message.id)
+                counters["enviado"] += 1
+            except ChannelError as e:
+                if e.retryable and message.tentativas + 1 < CAMPAIGN_MAX_RETRIES:
+                    _db.mark_campaign_message_retry(
+                        message.id, message.tentativas + 1, str(e)
+                    )
+                    counters["pendente"] += 1
+                else:
+                    _db.mark_campaign_message_failed(message.id, str(e))
+                    counters["falha"] += 1
+            except Exception as e:
+                logger.exception(
+                    "Erro inesperado enviando disparo #%s: %s", message.id, e
+                )
+                _db.mark_campaign_message_failed(message.id, str(e))
+                counters["falha"] += 1
+
+        if index < len(messages) - 1:
+            time.sleep(CAMPAIGN_SEND_INTERVAL_SECONDS)
+
+    return {"ok": True, "processed": len(messages), **counters}
+
+
 def process_customer_message(
     phone: str,
     text: str,
@@ -324,6 +584,7 @@ def process_customer_message(
     canal: str | None = None,
     history_override: list | None = None,
     session_override: SessionState | None = None,
+    order: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Handle an inbound customer message (or admin simulation).
 
@@ -334,6 +595,10 @@ def process_customer_message(
     turns without ever touching the real `sim_phone` contact's actual
     history (which stays untouched, exactly like every other `simulated`
     guard in this function).
+
+    `order` is the catalog order dict attached by
+    `whatbot.webhook.parse_evolution_payload` (or `None`) — its presence
+    forces an unconditional handover below (catalog-order-capture).
     """
     canal = normalize_channel(canal)
     queue_check: Dict[str, Any] = {}
@@ -423,7 +688,33 @@ def process_customer_message(
         ia_ativa=contact.ia_ativa,
     )
 
-    if detectar_pedido_atendimento_humano(text):
+    if order is not None or detectar_pedido_atendimento_humano(text):
+        # A catalog order always triggers handover unconditionally,
+        # regardless of `items_identifiable` — see
+        # openspec/changes/catalog-order-capture/design.md, Decisão 3.
+        motivo = "pedido_catalogo" if order is not None else "pedido_do_cliente"
+        if order is not None and not simulated:
+            # Requirement "Estágio do contato transiciona automaticamente"
+            # (openspec/specs/contacts/spec.md): a real catalog order forces
+            # `contatos.status` to "comprando" immediately, regardless of
+            # `items_identifiable`. Reuses the same `next_status` rule the
+            # rest of this function relies on for status transitions
+            # (`has_order=True` short-circuits before touching
+            # `session`/`intent`, so a placeholder `SessionState` is fine
+            # here — session/intent routing never runs on this early-return
+            # path). Guarded by `not simulated`, same as every other status
+            # write in this function.
+            try:
+                new_status = next_status(
+                    contact.status, SessionState(), "", has_order=True
+                )
+                if new_status is not None:
+                    _db.set_contact_status(contact.id, new_status)
+                    contact.status = new_status
+            except Exception:
+                logger.exception(
+                    "Falha ao atualizar status do contato para pedido de catálogo"
+                )
         try:
             result = executar_handover_para_secretaria(
                 phone=phone,
@@ -431,11 +722,12 @@ def process_customer_message(
                 router=_router,
                 db=_db,
                 logger=logger,
-                motivo="pedido_do_cliente",
+                motivo=motivo,
                 push_name=push_name,
                 user_message=text,
                 simulated=simulated,
                 canal=canal,
+                order=order,
             )
             result["queue_check"] = queue_check
             result["simulated"] = simulated
@@ -461,7 +753,26 @@ def process_customer_message(
         else SessionState.from_dict(contact.session_state or {})
     )
     intent_result = route_intent(text, session, history)
-    session = update_session_state(session, text, intent_result.intent, history)
+    session = update_session_state(session, intent_result.intent, intent_result.items)
+
+    # A catalog order (`order` not `None`) always short-circuits into the
+    # handover branch above — which already forces `comprando` there — and
+    # returns before reaching this line, so `has_order` is unreachably
+    # always `False` here; purchase intent for `next_status` on this path is
+    # detected purely from `intent_result.intent`.
+    has_order = False
+    new_status = next_status(contact.status, session, intent_result.intent, has_order)
+    if new_status is not None and not simulated:
+        # Guarded by `not simulated`: an admin testing the bot via
+        # simulation must never advance the real (or sim_phone-colliding)
+        # contact's business stage — same reasoning as the
+        # `update_contact_session_state` guard below.
+        try:
+            _db.set_contact_status(contact.id, new_status)
+            contact.status = new_status
+        except Exception:
+            logger.exception("Falha ao atualizar status do contato")
+
     hist_summary = history_summary(history)
 
     system_prompt = build_enriched_system_prompt(
@@ -682,6 +993,12 @@ def process_customer_message(
         "ok": True,
         "sent": True,
         "model_reply": model_reply,
+        # See `whatbot/domain.py::executar_handover_para_secretaria` for why
+        # this key exists: the normalized "what the customer would see this
+        # turn" field every reply-producing branch fills in, so callers
+        # (`run_admin_simulation`) never have to guess between `model_reply`
+        # and whatever a handover branch happens to call its text.
+        "customer_reply_text": model_reply,
         "queue_check": queue_check,
         "simulated": simulated,
         "intent": intent_result.intent,
@@ -820,6 +1137,7 @@ def _dispatch_payload(
     )
     text = (payload.get("text") or payload.get("message") or "").strip()
     push_name = payload.get("push_name")
+    order = payload.get("order")
 
     if not phone or not text:
         if original.get("event"):
@@ -903,7 +1221,9 @@ def _dispatch_payload(
         )
         return {"ok": True, "ignored": True, "reason": "test_mode"}
 
-    return process_customer_message(phone, text, push_name=push_name, canal=canal)
+    return process_customer_message(
+        phone, text, push_name=push_name, canal=canal, order=order
+    )
 
 
 if __name__ == "__main__":

@@ -74,16 +74,21 @@ def executar_handover_para_secretaria(
     simulated: bool = False,
     customer_message: str | None = None,
     canal: str | None = None,
+    order: dict | None = None,
 ) -> dict:
     """Stop the bot, enqueue for secretariat, and notify admin if thresholds met.
 
     The customer is answered on their own channel; admins are always notified on
     the admin channel (WhatsApp).
+
+    `order` (a catalog order dict from `whatbot/webhook.py::_extract_order`,
+    or `None`) forces priority 1 unconditionally when present — see
+    openspec/changes/catalog-order-capture/design.md, Decisão 3.
     """
     from .channels import send_to_contact
     from .queue import check_long_wait_notifications, process_new_handover
 
-    prioridade = calcular_prioridade_handover(user_message or "")
+    prioridade = calcular_prioridade_handover(user_message or "", order=order)
 
     handover_text = customer_message or (
         "Encaminhando você para um atendente. "
@@ -127,7 +132,9 @@ def executar_handover_para_secretaria(
             )
         try:
             waiting = db.get_contact_waiting(phone, canal=canal)
-            notify_result = process_new_handover(db, router, contact=waiting)
+            notify_result = process_new_handover(
+                db, router, contact=waiting, last_order=order
+            )
             long_wait_result = check_long_wait_notifications(db, router)
         except Exception:
             logger.exception(
@@ -147,4 +154,13 @@ def executar_handover_para_secretaria(
         "prioridade": prioridade,
         "admin_notify": notify_result,
         "long_wait_check": long_wait_result,
+        # The text a real customer would see for this turn — every branch of
+        # `process_customer_message` that can produce a customer-facing reply
+        # DEVE preencher esta chave (não só `model_reply`, que só existe no
+        # caminho de resposta direta da LLM). É o que permite que
+        # `run_admin_simulation` só decore o texto, sem adivinhar qual chave
+        # do result carrega a resposta (openspec/project.md não documenta
+        # isso ainda — nasceu de um bug real de simulação despejando o dict
+        # cru quando o turno terminava em handover sem `model_reply`).
+        "customer_reply_text": handover_text,
     }

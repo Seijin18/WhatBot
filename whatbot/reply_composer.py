@@ -65,11 +65,11 @@ class ReplyComposer:
         handler = handlers.get(intent, self._compose_faq)
         return handler(user_message, session, intent_result)
 
-    def _modality_families(self, mods: List[str]) -> List[str]:
+    def _item_families(self, items: List[str]) -> List[str]:
         families: list[str] = []
-        for mod in mods:
-            root = mod.split("(")[0].strip() if "(" in mod else mod
-            root = root.split()[0] if root.split() else mod
+        for item in items:
+            root = item.split("(")[0].strip() if "(" in item else item
+            root = root.split()[0] if root.split() else item
             if not any(
                 norm_text(root) in norm_text(existing) or norm_text(existing) in norm_text(root)
                 for existing in families
@@ -82,17 +82,17 @@ class ReplyComposer:
             return families[0]
         return " e ".join(families[:-1]) + f" e {families[-1]}"
 
-    def _modalities_label(self, mods: List[str], user_message: str = "") -> str:
+    def _items_label(self, items: List[str], user_message: str = "") -> str:
         if user_message:
-            asked = self._modality_families(self._facts.match_modalidades(user_message))
+            asked = self._item_families(self._facts.match_items(user_message))
             if asked:
                 return self._join_families(asked)
-        if not mods:
-            return "as modalidades cadastradas"
-        families = self._modality_families(mods)
-        all_families = self._modality_families(self._facts.modalidade_names)
+        if not items:
+            return "os itens cadastrados"
+        families = self._item_families(items)
+        all_families = self._item_families(self._facts.item_names)
         if len(families) >= len(all_families):
-            return "todas as modalidades cadastradas"
+            return "todos os itens cadastrados"
         return self._join_families(families)
 
     def _price_disclaimer(self) -> str:
@@ -113,11 +113,11 @@ class ReplyComposer:
         self, user_message: str, session: SessionState, intent: IntentResult
     ) -> str:
         label = self._facts.business_name
-        if self._facts.modalidade_names:
-            mods = ", ".join(self._facts.modalidade_names)
+        if self._facts.item_names:
+            items = ", ".join(self._facts.item_names)
             return (
                 f"Olá! Somos a {label}. "
-                f"Temos {mods}. "
+                f"Temos {items}. "
                 f"Posso ajudar com horários, preços ou agendamento de aula experimental?"
             )
         return (
@@ -128,45 +128,45 @@ class ReplyComposer:
     def _compose_horarios(
         self, user_message: str, session: SessionState, intent: IntentResult
     ) -> str:
-        from .tools import listar_modalidades
+        from .tools import listar_itens
 
-        if not self._facts.modalidade_names:
-            # No `## Modalidades` section in this KB — there's no schedule
-            # to look up, so the closest useful reply to a "horários"/"o
-            # que vocês têm" style question is the catalog/price listing
-            # (`listar_modalidades()` itself falls back to it — see
+        if not self._facts.item_names:
+            # No `## Itens` section in this KB — there's no schedule to
+            # look up, so the closest useful reply to a "horários"/"o que
+            # vocês têm" style question is the catalog/price listing
+            # (`listar_itens()` itself falls back to it — see
             # docs/REVISAO_CAMADA_CONVERSACIONAL.md, P1.1/P1.3). Without
             # this early return, the code below fell through to
             # `buscar_horarios_turmas("")`, which returned a broken
-            # "Modalidade '' não encontrada" message.
-            return f"{listar_modalidades()}\n\n{self._closing()}"
+            # "Item '' não encontrado" message.
+            return f"{listar_itens()}\n\n{self._closing()}"
 
         norm = norm_text(user_message)
         if any(token in norm for token in _LISTING_SIGNALS):
-            listing = listar_modalidades()
+            listing = listar_itens()
             return f"{listing}\n\n{self._closing()}"
 
-        mods = intent.modalities or session.modalidade_interesse or self._facts.modalidade_names
+        items = intent.items or session.item_interesse or self._facts.item_names
         parts: list[str] = []
-        for mod in mods:
-            block = buscar_horarios_turmas(mod)
-            if block and "não encontrada" not in block.lower():
+        for item in items:
+            block = buscar_horarios_turmas(item)
+            if block and "não encontrado" not in block.lower():
                 parts.append(block)
-        body = "\n".join(parts) or buscar_horarios_turmas(mods[0] if mods else "")
+        body = "\n".join(parts) or buscar_horarios_turmas(items[0] if items else "")
         return f"{body}\n\n{self._closing()}"
 
     def _compose_precos(
         self, user_message: str, session: SessionState, intent: IntentResult
     ) -> str:
-        mods = intent.modalities or session.modalidade_interesse
-        if not mods:
-            mods = self._facts.resolve_modalidades(user_message, session.modalidade_interesse)
+        items = intent.items or session.item_interesse
+        if not items:
+            items = self._facts.resolve_items(user_message, session.item_interesse)
 
-        unique_groups = self._group_modalidades_for_pricing(mods)
-        scope_mods = self._facts.resolve_modalidades(user_message, session.modalidade_interesse) or mods
-        if len(unique_groups) >= 2 or len(self._modality_families(scope_mods)) >= 2:
+        unique_groups = self._group_items_for_pricing(items)
+        scope_items = self._facts.resolve_items(user_message, session.item_interesse) or items
+        if len(unique_groups) >= 2 or len(self._item_families(scope_items)) >= 2:
             lines = [
-                f"Os planos mensal e semestral valem para {self._modalities_label(scope_mods, user_message)}:",
+                f"Os planos mensal e semestral valem para {self._items_label(scope_items, user_message)}:",
                 f"- Plano mensal: R$ {self._facts.monthly_price} (1 aluno)"
                 if self._facts.monthly_price is not None
                 else "- Plano mensal: consulte o atendimento",
@@ -184,15 +184,15 @@ class ReplyComposer:
             body = buscar_precos("")
         return f"{body}\n\n{self._closing()}"
 
-    def _group_modalidades_for_pricing(self, mods: List[str]) -> List[str]:
+    def _group_items_for_pricing(self, items: List[str]) -> List[str]:
         """Collapse variant names (e.g. judô infantil/adulto) to one entry per family."""
-        if not mods:
+        if not items:
             return []
         groups: list[str] = []
-        for mod in mods:
-            root = mod.split()[0] if mod.split() else mod
-            if not any(root in existing or existing in mod for existing in groups):
-                groups.append(mod)
+        for item in items:
+            root = item.split()[0] if item.split() else item
+            if not any(root in existing or existing in item for existing in groups):
+                groups.append(item)
         return groups
 
     def _compose_experimental(
@@ -205,7 +205,7 @@ class ReplyComposer:
 
         if "mais de uma" in norm or "quantas" in norm:
             lines = [
-                "Sim, você pode agendar aula experimental — cada modalidade tem seu dia disponível:"
+                "Sim, você pode agendar aula experimental — cada item tem seu dia disponível:"
             ]
             for slot in slots:
                 day = day_label(slot.days[0]) if slot.days else "consulte o atendimento"
@@ -220,8 +220,8 @@ class ReplyComposer:
             )
             return "\n".join(lines)
 
-        primary = self._facts.primary_modalidade(
-            user_message, session.modalidade_interesse
+        primary = self._facts.primary_item(
+            user_message, session.item_interesse
         )
         if not primary and slots:
             primary = slots[0].primary_name()
@@ -240,10 +240,10 @@ class ReplyComposer:
 
         slot = self._facts.experimental_slot_for(primary) if primary else None
         day_text = day_label(slot.days[0]) if slot and slot.days else "consulte o atendimento"
-        modality_label = primary or (slot.primary_name() if slot else "a modalidade")
+        item_label = primary or (slot.primary_name() if slot else "o item")
 
         return (
-            f"A aula experimental de {modality_label} é agendada para {day_text}. "
+            f"A aula experimental de {item_label} é agendada para {day_text}. "
             f"{self._price_disclaimer()}\n\n"
             "Para agendar, envie nome, idade, celular/telefone e o dia desejado.\n\n"
             f"{self._closing()}"
