@@ -19,6 +19,7 @@ import unicodedata
 from whatbot.channels import WHATSAPP, normalize_channel
 from whatbot.db import (
     CONTACT_STATUSES,
+    CONTACT_TIPO_CLIENTES,
     ChannelCredential,
     Contact,
     MessageRecord,
@@ -203,6 +204,7 @@ class FakeDatabase:
             canal=row["canal"],
             external_id=row["external_id"],
             handle=row["handle"],
+            tipo_cliente=row.get("tipo_cliente", "b2c"),
         )
 
     def _row_to_waiting(self, row: dict) -> WaitingContact:
@@ -279,6 +281,7 @@ class FakeDatabase:
             "external_id": external_id,
             "handle": handle,
             "last_inbound_at": None,
+            "tipo_cliente": "b2c",
         }
         self.contacts[contact_id] = row
         return self._row_to_contact(row)
@@ -302,6 +305,14 @@ class FakeDatabase:
                 f"status inválido: {status!r} (esperado um de {sorted(CONTACT_STATUSES)})"
             )
         self.contacts[contact_id]["status"] = status
+
+    def set_contact_tipo_cliente(self, contact_id: int, tipo_cliente: str) -> None:
+        if tipo_cliente not in CONTACT_TIPO_CLIENTES:
+            raise ValueError(
+                f"tipo_cliente inválido: {tipo_cliente!r} "
+                f"(esperado um de {sorted(CONTACT_TIPO_CLIENTES)})"
+            )
+        self.contacts[contact_id]["tipo_cliente"] = tipo_cliente
 
     def update_contact_last_inbound(
         self, contact_id: int, when: datetime | None = None
@@ -627,6 +638,7 @@ class FakeDatabase:
                 "canal": r["canal"],
                 "external_id": r["external_id"],
                 "handle": r["handle"],
+                "tipo_cliente": r.get("tipo_cliente", "b2c"),
                 "label": resolve_label(r["push_name"], r["handle"], r["external_id"] or r["phone"]),
             }
             for r in matches[:5]

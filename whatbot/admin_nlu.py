@@ -13,6 +13,7 @@ IntentAction = Literal[
     "reactivate",
     "pause",
     "mark_active_client",
+    "set_tipo_cliente",
     "summary",
     "help",
     "complete_all",
@@ -24,6 +25,9 @@ IntentAction = Literal[
 class AdminIntent:
     action: IntentAction
     query: str = ""
+    # `contact-segmentation-b2b-b2c`: desired `contatos.tipo_cliente` value
+    # ("b2b"/"b2c"), only set when `action == "set_tipo_cliente"`.
+    tipo_cliente: str | None = None
 
 
 _LIST = re.compile(
@@ -86,6 +90,35 @@ _MARK_ACTIVE_CLIENT_PREFIX = re.compile(
 )
 _MARK_ACTIVE_CLIENT_SUFFIX = re.compile(r"\b(?:como\s+)?cliente\s+ativo\b", re.I)
 
+# `contact-segmentation-b2b-b2c`: manual admin command to label a contact as
+# a company (`b2b`) or an individual (`b2c`) — `contatos.tipo_cliente`, a
+# different axis from `status`/`cliente_ativo` above. Suffix-only phrasing
+# ("marca a Maria como empresa", "define Maria como B2B"), same shape as
+# `_MARK_ACTIVE_CLIENT_SUFFIX`: requiring "como X" as the trigger (not a bare
+# "empresa"/"b2b" anywhere in the text) avoids false positives on a company
+# name mentioned in conversation. Checked BEFORE
+# `_MARK_ACTIVE_CLIENT_PREFIX`'s bare fallback (line further below) — both
+# share trigger verbs ("marca"/"marque"), so without this ordering "marca a
+# Maria como empresa" would be mis-parsed as `mark_active_client` once the
+# (non-matching) `_MARK_ACTIVE_CLIENT_SUFFIX` check falls through to the bare
+# prefix check.
+_SET_TIPO_CLIENTE_B2B_SUFFIX = re.compile(r"\bcomo\s+(?:empresa|b2b)\b", re.I)
+_SET_TIPO_CLIENTE_B2C_SUFFIX = re.compile(
+    r"\bcomo\s+pessoa\s+f[ií]sica\b|\bcomo\s+b2c\b", re.I
+)
+# Prefix triggers shared by both directions above — "swallow the filler
+# article" alternative tried first (e.g. "marca a "), same reasoning as
+# `_MARK_ACTIVE_CLIENT_PREFIX`: `search_contacts_for_admin` matches the
+# leftover query as a raw substring, not tokenized, so a stray leading
+# "a"/"o" would make an otherwise-matching `push_name` miss entirely.
+_SET_TIPO_CLIENTE_PREFIX = re.compile(
+    r"\bmarca(?:r)?\s+(?:a|o)\s+"
+    r"|\bmarque\s+(?:a|o)\s+"
+    r"|\bdefin(?:e|ir)\s+"
+    r"|\b(?:marca(?:r)?|marque|defin(?:e|ir))\b",
+    re.I,
+)
+
 
 def _strip_intent_prefix(text: str, pattern: re.Pattern[str]) -> str:
     match = pattern.search(text)
@@ -126,6 +159,18 @@ def parse_admin_intent(text: str) -> AdminIntent:
         query = _strip_intent_suffix(raw, _MARK_ACTIVE_CLIENT_SUFFIX)
         query = _strip_intent_prefix(query, _MARK_ACTIVE_CLIENT_PREFIX)
         return AdminIntent("mark_active_client", query or raw)
+
+    # Checked before the `_MARK_ACTIVE_CLIENT_PREFIX` bare fallback below —
+    # see comment on `_SET_TIPO_CLIENTE_B2B_SUFFIX` above.
+    if _SET_TIPO_CLIENTE_B2B_SUFFIX.search(lower):
+        query = _strip_intent_suffix(raw, _SET_TIPO_CLIENTE_B2B_SUFFIX)
+        query = _strip_intent_prefix(query, _SET_TIPO_CLIENTE_PREFIX)
+        return AdminIntent("set_tipo_cliente", query or raw, tipo_cliente="b2b")
+
+    if _SET_TIPO_CLIENTE_B2C_SUFFIX.search(lower):
+        query = _strip_intent_suffix(raw, _SET_TIPO_CLIENTE_B2C_SUFFIX)
+        query = _strip_intent_prefix(query, _SET_TIPO_CLIENTE_PREFIX)
+        return AdminIntent("set_tipo_cliente", query or raw, tipo_cliente="b2c")
 
     if _MARK_ACTIVE_CLIENT_PREFIX.search(lower):
         query = _strip_intent_prefix(raw, _MARK_ACTIVE_CLIENT_PREFIX)

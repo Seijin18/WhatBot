@@ -41,6 +41,12 @@ CONTACT_STATUSES = {
     "cancelado",
 }
 
+# Closed set of `contatos.tipo_cliente` values (contact-segmentation-b2b-b2c).
+# Validated in Python by `Database.set_contact_tipo_cliente` — same style as
+# `CONTACT_STATUSES` above, no DB `CHECK` constraint (see design.md,
+# Decisão 1).
+CONTACT_TIPO_CLIENTES = {"b2c", "b2b"}
+
 
 @dataclass
 class Contact:
@@ -57,6 +63,7 @@ class Contact:
     canal: str = WHATSAPP
     external_id: str | None = None
     handle: str | None = None
+    tipo_cliente: str = "b2c"
 
     @property
     def label(self) -> str:
@@ -173,6 +180,10 @@ class Database:
         ALTER TABLE contatos ADD COLUMN IF NOT EXISTS external_id VARCHAR(64);
         ALTER TABLE contatos ADD COLUMN IF NOT EXISTS handle VARCHAR(128);
         ALTER TABLE contatos ADD COLUMN IF NOT EXISTS last_inbound_at TIMESTAMP WITH TIME ZONE;
+        -- contact-segmentation-b2b-b2c: pessoa física (`b2c`) vs. empresa
+        -- (`b2b`), validado em Python (`CONTACT_TIPO_CLIENTES`), sem CHECK de
+        -- banco — mesmo padrão de `status` (ver design.md, Decisão 1).
+        ALTER TABLE contatos ADD COLUMN IF NOT EXISTS tipo_cliente VARCHAR(8) NOT NULL DEFAULT 'b2c';
         UPDATE contatos SET canal = 'whatsapp' WHERE canal IS NULL;
         UPDATE contatos SET external_id = phone WHERE external_id IS NULL;
         ALTER TABLE contatos ALTER COLUMN canal SET NOT NULL;
@@ -289,12 +300,13 @@ class Database:
             canal=row[10] if len(row) > 10 and row[10] else WHATSAPP,
             external_id=row[11] if len(row) > 11 else None,
             handle=row[12] if len(row) > 12 else None,
+            tipo_cliente=row[13] if len(row) > 13 and row[13] else "b2c",
         )
 
     _CONTACT_SELECT = """
         SELECT id, phone, status, ia_ativa, created_at,
                push_name, handover_at, atendido_at, handover_motivo, session_state,
-               canal, external_id, handle
+               canal, external_id, handle, tipo_cliente
         FROM contatos
     """
 
@@ -436,6 +448,30 @@ class Database:
                     )
         except Exception as e:
             self._logger.exception("Erro atualizando status: %s", e)
+            raise
+
+    def set_contact_tipo_cliente(self, contact_id: int, tipo_cliente: str) -> None:
+        """Update `contatos.tipo_cliente` (contact-segmentation-b2b-b2c).
+
+        Validated against `CONTACT_TIPO_CLIENTES` in Python before touching
+        the DB — raises `ValueError` for anything outside the closed set,
+        the same style as `set_contact_status`.
+        """
+        if tipo_cliente not in CONTACT_TIPO_CLIENTES:
+            raise ValueError(
+                f"tipo_cliente inválido: {tipo_cliente!r} "
+                f"(esperado um de {sorted(CONTACT_TIPO_CLIENTES)})"
+            )
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE contatos SET tipo_cliente = %s WHERE id = %s",
+                        (tipo_cliente, contact_id),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro atualizando tipo_cliente: %s", e)
             raise
 
     def update_contact_last_inbound(
@@ -1044,7 +1080,7 @@ class Database:
                         """
                         SELECT id, phone, push_name, ia_ativa,
                                handover_at IS NOT NULL AND atendido_at IS NULL AS in_queue,
-                               canal, external_id, handle
+                               canal, external_id, handle, tipo_cliente
                         FROM contatos
                         WHERE phone LIKE %s OR external_id LIKE %s
                         ORDER BY created_at DESC LIMIT 5
@@ -1058,7 +1094,7 @@ class Database:
                         """
                         SELECT id, phone, push_name, ia_ativa,
                                handover_at IS NOT NULL AND atendido_at IS NULL AS in_queue,
-                               canal, external_id, handle
+                               canal, external_id, handle, tipo_cliente
                         FROM contatos
                         WHERE push_name ILIKE %s OR handle ILIKE %s
                         ORDER BY created_at DESC LIMIT 5
@@ -1075,6 +1111,7 @@ class Database:
                         "canal": r[5],
                         "external_id": r[6],
                         "handle": r[7],
+                        "tipo_cliente": r[8],
                         "label": resolve_label(r[2], r[7], r[6] or r[1]),
                     }
                     for r in cur.fetchall()

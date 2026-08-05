@@ -54,6 +54,34 @@ class TestAdminNlu(unittest.TestCase):
         self.assertEqual(intent.action, "mark_active_client")
         self.assertIn("maria", intent.query.lower())
 
+    def test_set_tipo_cliente_intent_empresa_phrasing(self):
+        intent = parse_admin_intent("marca a Maria como empresa")
+        self.assertEqual(intent.action, "set_tipo_cliente")
+        self.assertEqual(intent.tipo_cliente, "b2b")
+        self.assertIn("maria", intent.query.lower())
+
+    def test_set_tipo_cliente_intent_pessoa_fisica_phrasing(self):
+        intent = parse_admin_intent("marca o João como pessoa física")
+        self.assertEqual(intent.action, "set_tipo_cliente")
+        self.assertEqual(intent.tipo_cliente, "b2c")
+        self.assertIn("joão", intent.query.lower())
+
+    def test_set_tipo_cliente_intent_define_b2b_phrasing(self):
+        intent = parse_admin_intent("define Maria como B2B")
+        self.assertEqual(intent.action, "set_tipo_cliente")
+        self.assertEqual(intent.tipo_cliente, "b2b")
+        self.assertIn("maria", intent.query.lower())
+
+    def test_set_tipo_cliente_does_not_collide_with_mark_active_client(self):
+        """Both share trigger verbs ("marca"/"marque") — the suffix
+        ("como empresa" vs. "como cliente ativo") must be what disambiguates
+        the intent, not verb order in `parse_admin_intent`."""
+        empresa_intent = parse_admin_intent("marca a Maria como empresa")
+        self.assertEqual(empresa_intent.action, "set_tipo_cliente")
+
+        cliente_ativo_intent = parse_admin_intent("marca a Maria como cliente ativo")
+        self.assertEqual(cliente_ativo_intent.action, "mark_active_client")
+
     def test_simulate(self):
         phone, msg = parse_simulate_command("#simular 5511888888888 Olá")
         self.assertEqual(phone, "5511888888888")
@@ -324,6 +352,163 @@ class TestMarkActiveClientCommand(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertIn("Não encontrei", result["reply"])
+
+
+class TestSetTipoClienteCommand(unittest.TestCase):
+    """`contact-segmentation-b2b-b2c`: manual admin command to label a
+    contact as `b2b` (empresa) or `b2c` (pessoa física), reusing
+    `search_contacts_for_admin` + the same disambiguation flow already
+    covered by `TestMarkActiveClientCommand`/`TestPauseCommand`."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"ADMIN_NOTIFY_PHONES": "5511900000001"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_single_match_marks_the_contact_as_empresa(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        contact = db.create_contact(phone="5511888888888", push_name="Maria Silva")
+        self.assertEqual(contact.tipo_cliente, "b2c")
+
+        result = handle_admin_message(
+            "5511900000001",
+            "marca a Maria Silva como empresa",
+            db,
+            router,
+            contact_id=1,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("empresa", result["reply"].lower())
+        updated = db.get_contact_by_phone("5511888888888")
+        self.assertEqual(updated.tipo_cliente, "b2b")
+        # A different axis from `status` — marking `tipo_cliente` must not
+        # touch it (regression guard for the shared "marca"/"marque" verbs
+        # between this command and `mark_active_client`).
+        self.assertEqual(updated.status, "novo_lead")
+
+    def test_define_b2b_phrasing_marks_the_contact_directly(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Maria Silva")
+
+        result = handle_admin_message(
+            "5511900000001", "define Maria Silva como B2B", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        updated = db.get_contact_by_phone("5511888888888")
+        self.assertEqual(updated.tipo_cliente, "b2b")
+
+    def test_pessoa_fisica_phrasing_switches_an_existing_empresa_back_to_b2c(self):
+        # `push_name` intentionally has no diacritic here (unlike the
+        # example phrase "João" tested at the NLU layer above): resolution
+        # goes through `search_contacts_for_admin`, which folds the *query*
+        # to ASCII before matching but does not fold `push_name` — an
+        # accented `push_name` would miss (pre-existing bug, shared by
+        # `reactivate`/`pause`/`mark_active_client`, out of scope for this
+        # change; see also `_SET_TIPO_CLIENTE_B2C_SUFFIX`, which is only
+        # responsible for recognizing the "como pessoa física" trigger, not
+        # for the name-matching step downstream).
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        contact = db.create_contact(phone="5511888888888", push_name="Joao")
+        db.set_contact_tipo_cliente(contact.id, "b2b")
+
+        result = handle_admin_message(
+            "5511900000001", "marca o Joao como pessoa física", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("pessoa física", result["reply"].lower())
+        updated = db.get_contact_by_phone("5511888888888")
+        self.assertEqual(updated.tipo_cliente, "b2c")
+
+    def test_phone_query_marks_the_contact_directly(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Maria Silva")
+
+        result = handle_admin_message(
+            "5511900000001",
+            "marca 5511888888888 como empresa",
+            db,
+            router,
+            contact_id=1,
+        )
+
+        self.assertTrue(result["ok"])
+        updated = db.get_contact_by_phone("5511888888888")
+        self.assertEqual(updated.tipo_cliente, "b2b")
+
+    def test_two_contacts_named_maria_trigger_disambiguation_then_resolve(self):
+        """Regression (bug already caught once for `pause`): the
+        disambiguation continuation must actually apply the originally
+        requested `tipo_cliente` ("b2b"), not silently drop it — exercised
+        end to end, not just asserted on the intermediate `acao` string."""
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        first = db.create_contact(phone="5511888888888", push_name="Maria Silva")
+        second = db.create_contact(phone="5511777777777", push_name="Maria Costa")
+
+        disambiguation = handle_admin_message(
+            "5511900000001", "marca a Maria como empresa", db, router, contact_id=1
+        )
+        self.assertTrue(disambiguation["ok"])
+        self.assertIn("Encontrei vários contatos", disambiguation["reply"])
+        # Scenario "Nome ambíguo desambigua antes de alterar" — nothing
+        # changes until the admin answers.
+        self.assertEqual(db.get_contact_by_phone("5511888888888").tipo_cliente, "b2c")
+        self.assertEqual(db.get_contact_by_phone("5511777777777").tipo_cliente, "b2c")
+
+        picked = handle_admin_message(
+            "5511900000001", "1", db, router, contact_id=1
+        )
+
+        self.assertTrue(picked["ok"])
+        self.assertIn("empresa", picked["reply"].lower())
+        # `search_contacts_for_admin` orders candidates most-recent-first, so
+        # option "1" is Maria Costa (created second, 5511777777777).
+        self.assertEqual(
+            db.get_contact_by_phone("5511777777777").tipo_cliente, "b2b"
+        )
+        # The other Maria is untouched.
+        self.assertEqual(
+            db.get_contact_by_phone("5511888888888").tipo_cliente, "b2c"
+        )
+
+    def test_contact_not_found_replies_without_crashing(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+
+        result = handle_admin_message(
+            "5511900000001", "marca a Fulana como empresa", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("Não encontrei", result["reply"])
+
+    def test_confirmation_does_not_suggest_a_next_command(self):
+        """Design decision for this command (unlike `pause`'s confirmation):
+        no obvious single "inverse" command exists, so the reply must not
+        invent one — a made-up suggestion risks the exact bug already caught
+        for `pause` (a phrase that silently fails to resolve through
+        `search_contacts_for_admin`'s untokenized substring match)."""
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Maria Silva")
+
+        result = handle_admin_message(
+            "5511900000001",
+            "marca a Maria Silva como empresa",
+            db,
+            router,
+            contact_id=1,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("Envie", result["reply"])
 
 
 class TestPausarBotDb(unittest.TestCase):

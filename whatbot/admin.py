@@ -236,6 +236,40 @@ def _execute_action(
             f"Contato {label} não encontrado.",
         )
 
+    if acao.startswith("set_tipo_cliente:"):
+        # `contact-segmentation-b2b-b2c`: the desired value ("b2b"/"b2c") is
+        # encoded in `acao` itself (`f"set_tipo_cliente:{tipo_cliente}"`)
+        # rather than added as a new parameter here — `acao` is the only
+        # piece of this call that survives a disambiguation round-trip
+        # through `admin_sessao` (see `_resolve_set_tipo_cliente` /
+        # `_try_pending_disambiguation`), so it is the only place a second
+        # value can ride along.
+        tipo_cliente = acao.split(":", 1)[1]
+        contact = db.get_contact_by_phone(target.external_id, canal=target.canal)
+        if not contact:
+            return _reply(
+                router,
+                db,
+                admin_phone,
+                contact_id,
+                f"Contato {label} não encontrado.",
+            )
+        db.set_contact_tipo_cliente(contact.id, tipo_cliente)
+        tipo_label = "empresa (B2B)" if tipo_cliente == "b2b" else "pessoa física (B2C)"
+        # No suggestion of an "inverse command" here on purpose — unlike
+        # `pause`'s confirmation, there is no obvious single next command,
+        # and a made-up one risks the same bug already caught for `pause`
+        # (a suggested phrase that silently fails to resolve through
+        # `search_contacts_for_admin`'s untokenized substring match). Just
+        # confirm what changed.
+        return _reply(
+            router,
+            db,
+            admin_phone,
+            contact_id,
+            f"✅ *{label}* marcado(a) como *{tipo_label}*.",
+        )
+
     if acao == "mark_active_client":
         # `set_contact_status` takes a numeric contact id, not the
         # `(external_id, canal)` identity `target` carries — mirrors how
@@ -434,6 +468,60 @@ def _resolve_mark_active_client(
     return None, f"Não encontrei contato para *{query.strip()}*."
 
 
+def _resolve_set_tipo_cliente(
+    query: str, tipo_cliente: str, admin_phone: str, db: Database
+) -> tuple[TargetIdentity | None, str | None]:
+    """Same resolution/disambiguation shape as `_resolve_mark_active_client`
+    (no `ia_ativa` filter — any contact, active bot or not, is a valid
+    target for a B2B/B2C label, contact-segmentation-b2b-b2c).
+
+    `tipo_cliente` ("b2b"/"b2c") is only needed here to thread it into
+    `admin_sessao` when disambiguating (see `_execute_action`'s
+    `set_tipo_cliente:` branch for why it rides along in `acao`)."""
+    phone = extract_phone_from_text(query)
+    if phone:
+        return TargetIdentity(external_id=phone, canal=WHATSAPP, label=phone), None
+
+    rows = db.search_contacts_for_admin(query)
+    if len(rows) == 1:
+        r = rows[0]
+        return (
+            TargetIdentity(
+                external_id=r["external_id"] or r["phone"],
+                canal=r["canal"],
+                label=r["label"],
+            ),
+            None,
+        )
+    if len(rows) > 1:
+        candidatos = [
+            {
+                "id": r["id"],
+                "phone": r["phone"],
+                "push_name": r["push_name"],
+                "minutes_waiting": 0,
+                "prioridade": 0,
+                "canal": r["canal"],
+                "external_id": r["external_id"],
+                "handle": r["handle"],
+            }
+            for r in rows[:5]
+        ]
+        db.save_admin_sessao(
+            admin_phone, f"set_tipo_cliente:{tipo_cliente}", candidatos
+        )
+        lines = ["Encontrei vários contatos. Qual deles?"]
+        for idx, r in enumerate(rows[:5], start=1):
+            name = r["push_name"] or "Sem nome"
+            fila = " (na fila)" if r["in_queue"] else ""
+            canal = channel_label(r["canal"])
+            lines.append(f"*{idx}.* {name} — {r['label']} · {canal}{fila}")
+        lines.append("\nResponda com *1*, *2*... ou o telefone.")
+        return None, "\n".join(lines)
+
+    return None, f"Não encontrei contato para *{query.strip()}*."
+
+
 def handle_admin_message(
     phone: str,
     text: str,
@@ -521,6 +609,21 @@ def handle_admin_message(
             return _reply(router, db, admin_phone, contact_id, err)
         return _execute_action(
             "mark_active_client", target, admin_phone, db, router, contact_id
+        )
+
+    if intent.action == "set_tipo_cliente" and intent.query and intent.tipo_cliente:
+        target, err = _resolve_set_tipo_cliente(
+            intent.query, intent.tipo_cliente, admin_phone, db
+        )
+        if err:
+            return _reply(router, db, admin_phone, contact_id, err)
+        return _execute_action(
+            f"set_tipo_cliente:{intent.tipo_cliente}",
+            target,
+            admin_phone,
+            db,
+            router,
+            contact_id,
         )
 
     return _reply(
