@@ -9,17 +9,28 @@ change, because an unspecified channel resolves to the default (WhatsApp).
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, Iterable, List
 
 from .base import (
     ADMIN_CHANNEL,
     DEFAULT_CHANNEL,
     ChannelClient,
+    ChannelError,
     UnknownChannelError,
     normalize_channel,
 )
 
 logger = logging.getLogger("whatbot.channels")
+
+# Short backoff for a `ChannelError(retryable=True)` — seconds, not minutes:
+# real-time customer replies can't wait long, and the transient network
+# blips this covers (see whatsapp-send-resilience/proposal.md — IPv6 routes
+# unreachable inside the containers, confirmed to self-resolve on the very
+# next attempt) resolve in well under this window. Campaign/broadcast sends
+# have their own, much longer retry cycle (`CAMPAIGN_MAX_RETRIES` in
+# `whatbot/main.py`) — this is deliberately not that.
+_RETRY_BACKOFFS_SECONDS = (1, 3)
 
 
 class ChannelRouter:
@@ -69,14 +80,44 @@ class ChannelRouter:
         simulated: bool = False,
         human_agent: bool = False,
     ) -> Dict[str, Any]:
-        return self.client_for(canal).send_text(
-            to,
-            text,
-            source=source,
-            contact_id=contact_id,
-            simulated=simulated,
-            human_agent=human_agent,
-        )
+        """Send, retrying a `ChannelError(retryable=True)` with a short backoff.
+
+        Single choke point for the retry, shared by every channel client
+        (`EvolutionApiClient`, `InstagramClient`, `WhatsAppCloudClient`, ...)
+        instead of duplicating the loop in each one — see
+        `openspec/changes/whatsapp-send-resilience/design.md` equivalent
+        rationale in the proposal ("mora no roteador, não em cada
+        cliente"). `retryable=False` (or the final attempt) propagates
+        immediately, unchanged from before this retry existed.
+        """
+        client = self.client_for(canal)
+        attempts = len(_RETRY_BACKOFFS_SECONDS) + 1
+        for attempt in range(attempts):
+            try:
+                return client.send_text(
+                    to,
+                    text,
+                    source=source,
+                    contact_id=contact_id,
+                    simulated=simulated,
+                    human_agent=human_agent,
+                )
+            except ChannelError as exc:
+                is_last_attempt = attempt == attempts - 1
+                if not exc.retryable or is_last_attempt:
+                    raise
+                delay = _RETRY_BACKOFFS_SECONDS[attempt]
+                logger.warning(
+                    "Envio retryable falhou (tentativa %s/%s), tentando de "
+                    "novo em %ss: %s",
+                    attempt + 1,
+                    attempts,
+                    delay,
+                    exc,
+                )
+                time.sleep(delay)
+        # Unreachable: the loop above always returns or raises.
+        raise AssertionError("send_text retry loop exited without returning or raising")
 
     def send_admin_text(
         self,

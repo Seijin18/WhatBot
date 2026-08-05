@@ -137,7 +137,13 @@ class TestImportCampaignCsvParsing(unittest.TestCase):
 class TestSendCampaignQueueWorker(unittest.TestCase):
     def setUp(self):
         self.db = FakeDatabase()
-        patches = _base_infra_patches(self.db)
+        patches = _base_infra_patches(self.db) + [
+            # whatsapp-send-resilience: ChannelRouter.send_text now retries
+            # a retryable=True ChannelError with a real short backoff — a
+            # couple of tests below simulate exactly that via
+            # `client.raise_error`, which would otherwise sleep for real.
+            patch("whatbot.channels.router.time.sleep"),
+        ]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)

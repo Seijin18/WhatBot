@@ -232,8 +232,50 @@ def _replace_unresolvable_host(value: str, host: str, fallback: str | None = Non
     return value
 
 
+_ipv4_dns_forced = False
+
+
+def force_ipv4_dns() -> None:
+    """Make every stdlib-backed HTTP client in this process resolve IPv4 only.
+
+    whatsapp-send-resilience: containers on this host resolve AAAA (IPv6)
+    records for external hosts (`generativelanguage.googleapis.com`,
+    `graph.facebook.com`) but have no IPv6 route — `socket.create_connection`
+    is supposed to fall through to the next resolved address on failure, but
+    in practice both `requests` (Evolution/Instagram/WhatsApp Cloud clients)
+    and `httpx`/`httpcore` (Gemini) have been observed raising
+    `Network is unreachable` instead of falling back to the working IPv4
+    address, confirmed by a direct socket test against both families.
+    `evolution-api` (Node) already works around the equivalent problem via
+    `NODE_OPTIONS=--dns-result-order=ipv4first`; there is no such env var for
+    Python. Patching `socket.getaddrinfo` — the one function every one of
+    those HTTP stacks ultimately calls to resolve a hostname — fixes it at
+    the lowest common layer instead of separately for each library.
+
+    Idempotent: safe to call more than once per process (`bootstrap_env()`
+    may run several times), only ever patches the *original* function once.
+    """
+    global _ipv4_dns_forced
+    if _ipv4_dns_forced:
+        return
+    original_getaddrinfo = socket.getaddrinfo
+
+    def _ipv4_only_getaddrinfo(*args, **kwargs):
+        results = original_getaddrinfo(*args, **kwargs)
+        ipv4_results = [r for r in results if r[0] == socket.AF_INET]
+        # Fall back to the unfiltered list rather than returning an empty
+        # one — an IPv6-only host (none in this project's infra today, but
+        # not impossible) must still be able to connect, degraded rather
+        # than broken.
+        return ipv4_results or results
+
+    socket.getaddrinfo = _ipv4_only_getaddrinfo
+    _ipv4_dns_forced = True
+
+
 def bootstrap_env() -> None:
     """Load .env and make Docker service hostnames reachable from Windmill jobs."""
+    force_ipv4_dns()
     try:
         from dotenv import load_dotenv
     except ImportError:

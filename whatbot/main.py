@@ -984,14 +984,16 @@ def process_customer_message(
                 source="bot",
                 contact_id=contact.id,
             )
-            if canal == INSTAGRAM:
-                # Requirement "Alertas de saúde da integração": the real
-                # send path is the only place a consecutive-failure streak
-                # can be observed (critic BLOQUEADOR 1 — previously nothing
-                # called this outside of tests, so the alert never fired in
-                # production). `record_send_result` is best-effort and never
-                # raises.
-                record_send_result(_db, _router, canal, success=True)
+            # Requirement "Alertas de saúde da integração" (whatsapp-send-resilience:
+            # generalized from Instagram-only — canal_envio_falhas was
+            # already generic by `canal`, only this call site restricted
+            # it). The real send path is the only place a
+            # consecutive-failure streak can be observed (critic
+            # BLOQUEADOR 1 — previously nothing called this outside of
+            # tests for Instagram, so the alert never fired in
+            # production). `record_send_result` is best-effort and never
+            # raises.
+            record_send_result(_db, _router, canal, success=True)
         else:
             log_outbound(
                 phone,
@@ -1005,8 +1007,7 @@ def process_customer_message(
             logger.info("Simulação: resposta não enviada ao cliente fictício %s", phone)
     except ChannelError as e:
         logger.exception("Falha de entrega no canal %s: %s", e.canal, e)
-        if e.canal == INSTAGRAM:
-            record_send_result(_db, _router, e.canal, success=False)
+        record_send_result(_db, _router, e.canal, success=False)
         return {
             "ok": False,
             "error": "send_failed",

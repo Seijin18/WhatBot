@@ -120,6 +120,12 @@ class MainE2ETestCase(unittest.TestCase):
             patch.object(main_mod, "_llm", self.llm),
             patch.object(main_mod, "_init_infra", lambda: None),
             patch.dict(os.environ, BASE_ENV, clear=False),
+            # whatsapp-send-resilience: ChannelRouter.send_text now retries
+            # a `retryable=True` ChannelError with a short real backoff —
+            # several tests below set `raise_error` on a FakeClient to
+            # simulate exactly that, which would otherwise make this whole
+            # suite sleep for real seconds per failing call for no benefit.
+            patch("whatbot.channels.router.time.sleep"),
         ]
         for p in patches:
             p.start()
@@ -646,6 +652,36 @@ class TestSendFailureHealthAlertFiresFromTheRealSendPath(MainE2ETestCase):
 
         # Only one failure since the reset — never reached the threshold of 2.
         self.assertEqual(self.wa.sent, [])
+
+    def test_streak_is_tracked_for_whatsapp_too(self):
+        # whatsapp-send-resilience: record_send_result used to be
+        # Instagram-only (`if canal == INSTAGRAM`) even though
+        # canal_envio_falhas was always generic by `canal` — this pins the
+        # generalization directly against the streak counter, not the
+        # admin-alert delivery: ADMIN_CHANNEL is WhatsApp itself, so a
+        # failing WhatsApp client would also fail to deliver its own alert
+        # (a separate, pre-existing property of "admin sempre no canal do
+        # admin" — not something this change fixes).
+        self.wa.raise_error = ChannelError(
+            WHATSAPP, "instabilidade simulada", retryable=True
+        )
+        for i in range(2):
+            result = main_mod.process_customer_message(
+                CUSTOMER_PHONE, f"Mensagem {i}", canal=WHATSAPP
+            )
+            self.assertFalse(result["ok"])
+
+        self.assertEqual(self.db.send_fail_streaks.get(WHATSAPP), 2)
+
+    def test_streak_resets_on_success_for_whatsapp_too(self):
+        self.wa.raise_error = ChannelError(WHATSAPP, "falha", retryable=True)
+        main_mod.process_customer_message(CUSTOMER_PHONE, "Oi", canal=WHATSAPP)
+        self.assertEqual(self.db.send_fail_streaks.get(WHATSAPP), 1)
+
+        self.wa.raise_error = None
+        main_mod.process_customer_message(CUSTOMER_PHONE, "Oi de novo", canal=WHATSAPP)
+
+        self.assertEqual(self.db.send_fail_streaks.get(WHATSAPP), 0)
 
 
 class TestMessagingWindowBlocksAutomaticSend(MainE2ETestCase):
