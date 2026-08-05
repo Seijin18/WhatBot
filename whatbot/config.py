@@ -310,6 +310,39 @@ ENV_IG_ALERT_SILENCE_MINUTES = "IG_ALERT_SILENCE_MINUTES"
 DEFAULT_IG_ALERT_FAIL_STREAK = 5
 DEFAULT_IG_ALERT_SILENCE_MINUTES = 120
 
+# whatsapp-cloud-channel-client: selects which client is registered under
+# canal "whatsapp" in `whatbot/main.py::_init_infra()` — see
+# `openspec/changes/whatsapp-cloud-channel-client/design.md`, "Decisão:
+# WHATSAPP_PROVIDER com default evolution até validação". Default stays
+# `evolution` (today's behavior, unchanged) until an operator explicitly
+# opts into the Cloud API after completing Meta's onboarding.
+ENV_WHATSAPP_PROVIDER = "WHATSAPP_PROVIDER"
+WHATSAPP_PROVIDER_EVOLUTION = "evolution"
+WHATSAPP_PROVIDER_CLOUD = "cloud"
+DEFAULT_WHATSAPP_PROVIDER = WHATSAPP_PROVIDER_EVOLUTION
+
+# Meta webhook verification for the WhatsApp Cloud API — same protocol as
+# ENV_IG_WEBHOOK_VERIFY_TOKEN/ENV_IG_APP_SECRET (hub.challenge handshake,
+# X-Hub-Signature-256 HMAC), separate env vars because WhatsApp is
+# registered as its own product/webhook subscription in Meta Business
+# Manager, independent of the Instagram one.
+ENV_WA_CLOUD_WEBHOOK_VERIFY_TOKEN = "WA_CLOUD_WEBHOOK_VERIFY_TOKEN"
+ENV_WA_CLOUD_APP_SECRET = "WA_CLOUD_APP_SECRET"
+
+
+def resolve_whatsapp_provider(value: str | None = None) -> str:
+    """Normalize `WHATSAPP_PROVIDER`, falling back to the safe default.
+
+    An unset, empty, or unrecognized value resolves to `"evolution"` — the
+    default is never `"cloud"` by accident, matching the design decision
+    that switching providers is an explicit operator action, not something
+    a missing/malformed env var can trigger.
+    """
+    raw = (value if value is not None else os.getenv(ENV_WHATSAPP_PROVIDER, "")).strip().lower()
+    if raw not in (WHATSAPP_PROVIDER_EVOLUTION, WHATSAPP_PROVIDER_CLOUD):
+        return DEFAULT_WHATSAPP_PROVIDER
+    return raw
+
 # A credencial é considerada "perto de expirar" (Requirement "Renovação
 # automática de credencial") dentro desta janela.
 IG_CREDENTIAL_EXPIRY_WARNING_DAYS = 7

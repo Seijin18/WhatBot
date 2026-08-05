@@ -1,4 +1,5 @@
-"""Dedicated Instagram webhook ingestion service (FastAPI).
+"""Dedicated Meta webhook ingestion service (FastAPI) — Instagram and,
+since `whatsapp-cloud-channel-client`, WhatsApp Cloud API.
 
 See `openspec/changes/instagram-ingestion-service/design.md`, Decisão
 "serviço FastAPI dedicado, não apontar o webhook direto para o Windmill":
@@ -7,10 +8,19 @@ confirmation; the actual processing — which still ends in
 `whatbot.main.main(payload)`, no duplicated domain logic — runs in a
 `BackgroundTasks` job *after* the HTTP response has already been returned.
 
-The WhatsApp/Evolution path is unaffected: it keeps going straight through
-`windmill/f/whatbot/handler.py` -> `whatbot.main.main()`, synchronously. This
-module exists only for the Instagram side, which the Meta platform holds to a
-strict "acknowledge fast, otherwise we resend" contract.
+Both Meta products share the exact same `hub.challenge`/`X-Hub-Signature-256`
+protocol (`verify_handshake`/`verify_signature` below are product-agnostic,
+parameterized by whichever verify-token/app-secret env vars the caller
+passes) — only the payload parser and the route path differ per product.
+See `openspec/changes/whatsapp-cloud-channel-client/design.md`, "Decisão:
+reaproveitar `whatbot/ingress.py`, não duplicar o handshake Meta".
+
+The WhatsApp/Evolution path (`WHATSAPP_PROVIDER=evolution`, the default)
+remains unaffected: it keeps going straight through
+`windmill/f/whatbot/handler.py` -> `whatbot.main.main()`, synchronously, not
+through this service at all. This service is only used by Instagram and by
+WhatsApp when `WHATSAPP_PROVIDER=cloud`, both of which the Meta platform
+holds to a strict "acknowledge fast, otherwise we resend" contract.
 """
 
 from __future__ import annotations
@@ -25,10 +35,20 @@ from typing import Any, Dict, List
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from .channels import INSTAGRAM
-from .config import ENV_IG_APP_SECRET, ENV_IG_WEBHOOK_VERIFY_TOKEN, bootstrap_env
+from .channels import INSTAGRAM, WHATSAPP
+from .config import (
+    ENV_IG_APP_SECRET,
+    ENV_IG_WEBHOOK_VERIFY_TOKEN,
+    ENV_WA_CLOUD_APP_SECRET,
+    ENV_WA_CLOUD_WEBHOOK_VERIFY_TOKEN,
+    bootstrap_env,
+)
 from .instagram_webhook import KIND_MESSAGE, parse_instagram_payload
 from .main import main as whatbot_main
+from .whatsapp_cloud_webhook import (
+    KIND_MESSAGE as WA_KIND_MESSAGE,
+    parse_whatsapp_cloud_payload,
+)
 
 logger = logging.getLogger("whatbot.ingress")
 
@@ -126,6 +146,22 @@ def _extract_message_events(body: bytes) -> List[Dict[str, Any]]:
     return [e["data"] for e in events if e["kind"] == KIND_MESSAGE and e["data"]]
 
 
+def _extract_whatsapp_message_events(body: bytes) -> List[Dict[str, Any]]:
+    """Parse the raw body and keep only customer-message events to process.
+
+    `statuses` (delivery/read receipts) and malformed events are classified
+    by `parse_whatsapp_cloud_payload` but have nothing for
+    `whatbot.main.main()` to act on — see `whatbot/whatsapp_cloud_webhook.py`.
+    """
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        logger.warning("Corpo do webhook do WhatsApp Cloud não é JSON válido")
+        return []
+    events = parse_whatsapp_cloud_payload(payload)
+    return [e["data"] for e in events if e["kind"] == WA_KIND_MESSAGE and e["data"]]
+
+
 @app.get("/webhook/instagram")
 def verify_webhook(request: Request):
     """Handshake `GET` de verificação do webhook (Requirement "Autenticidade
@@ -162,6 +198,44 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
     return JSONResponse({"ok": True, "queued": len(events)}, status_code=200)
 
 
+@app.get("/webhook/whatsapp")
+def verify_whatsapp_webhook(request: Request):
+    """Handshake `GET` de verificação do webhook do WhatsApp Cloud API.
+
+    Mesmo protocolo Meta que `verify_webhook` (Instagram) — só troca o env
+    var do token esperado. Ver docstring do módulo.
+    """
+    params = request.query_params
+    expected = os.getenv(ENV_WA_CLOUD_WEBHOOK_VERIFY_TOKEN)
+    if verify_handshake(params.get("hub.mode"), params.get("hub.verify_token"), expected):
+        return PlainTextResponse(params.get("hub.challenge", ""), status_code=200)
+    return PlainTextResponse("verification failed", status_code=403)
+
+
+@app.post("/webhook/whatsapp")
+async def receive_whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
+    """Recebe um POST do webhook do WhatsApp Cloud API: valida, confirma
+    imediatamente, processa depois — mesmo formato de `receive_webhook`
+    (Instagram), trocando a validação de assinatura e o parser do payload.
+    """
+    body = await request.body()
+    secret = os.getenv(ENV_WA_CLOUD_APP_SECRET)
+    signature = request.headers.get("X-Hub-Signature-256")
+    if not verify_signature(secret, body, signature):
+        logger.warning("Webhook do WhatsApp Cloud recusado: assinatura inválida")
+        return JSONResponse({"ok": False, "error": "invalid_signature"}, status_code=403)
+
+    events = _extract_whatsapp_message_events(body)
+    for event_payload in events:
+        background_tasks.add_task(_process_event, event_payload)
+
+    return JSONResponse({"ok": True, "queued": len(events)}, status_code=200)
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    return {"ok": True, "service": "whatbot-ingress", "canal": INSTAGRAM}
+    return {
+        "ok": True,
+        "service": "whatbot-ingress",
+        "canais": [INSTAGRAM, WHATSAPP],
+    }
