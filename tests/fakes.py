@@ -34,6 +34,19 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _fold(text: str) -> str:
+    """Accent-fold + lowercase, mirroring `whatbot.contact_resolver._fold`.
+
+    Used by `FakeDatabase.search_contacts_for_admin` on *both* sides of the
+    comparison — the query term and the stored `push_name`/`handle` — to
+    mirror `Database.search_contacts_for_admin`'s `unaccent(push_name)` on
+    the real Postgres side. Folding only the query term (as the buggy
+    version did) misses a stored "João" when the admin types "Joao".
+    """
+    folded = unicodedata.normalize("NFKD", text.lower())
+    return folded.encode("ascii", "ignore").decode("ascii")
+
+
 class FakeClient:
     """Minimal channel client that records what it was asked to send."""
 
@@ -621,15 +634,14 @@ class FakeDatabase:
                 or (r["external_id"] and phone[-8:] in r["external_id"])
             ]
         else:
-            folded = unicodedata.normalize("NFKD", query.lower())
-            term = folded.encode("ascii", "ignore").decode("ascii")
+            term = _fold(query)
             matches = [
                 r
                 for r in self.contacts.values()
                 if term
                 and (
-                    term in (r["push_name"] or "").lower()
-                    or term in (r["handle"] or "").lower()
+                    term in _fold(r["push_name"] or "")
+                    or term in _fold(r["handle"] or "")
                 )
             ]
         matches.sort(key=lambda r: r["created_at"], reverse=True)

@@ -171,6 +171,12 @@ class Database:
     def ensure_schema(self) -> None:
         self.init_pool()
         sql = """
+        -- Usada por `search_contacts_for_admin` para dobrar acentos também no
+        -- lado do `push_name`/`handle` armazenados, simetricamente ao fold
+        -- (unicodedata NFKD) já aplicado ao termo de busca digitado pelo
+        -- admin — sem isso "Joao" não batia contra um contato salvo como
+        -- "João" (bug pré-existente, achado durante contact-segmentation-b2b-b2c).
+        CREATE EXTENSION IF NOT EXISTS unaccent;
         CREATE TABLE IF NOT EXISTS contatos (
             id SERIAL PRIMARY KEY,
             phone VARCHAR(32) UNIQUE NOT NULL,
@@ -1144,7 +1150,7 @@ class Database:
                                handover_at IS NOT NULL AND atendido_at IS NULL AS in_queue,
                                canal, external_id, handle, tipo_cliente
                         FROM contatos
-                        WHERE push_name ILIKE %s OR handle ILIKE %s
+                        WHERE unaccent(push_name) ILIKE %s OR unaccent(handle) ILIKE %s
                         ORDER BY created_at DESC LIMIT 5
                         """,
                         (term, term),

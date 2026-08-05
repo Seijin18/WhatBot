@@ -695,5 +695,45 @@ class TestPauseCommand(unittest.TestCase):
         self.assertTrue(db.get_contact_by_phone("5511888888888").ia_ativa)
 
 
+class TestReactivateAccentFold(unittest.TestCase):
+    """`search_contacts_for_admin` must fold accents on both sides of the
+    comparison — the admin's typed query *and* the stored `push_name` —
+    not just the query (pre-existing bug, found and documented during
+    contact-segmentation-b2b-b2c, confirmed pre-existing by `git log -p`).
+    Without this, "reativar joao" silently fails to find a contact saved
+    as "João" instead of erroring."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"ADMIN_NOTIFY_PHONES": "5511900000001"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_accented_stored_name_found_by_unaccented_query(self):
+        db = FakeDatabase()
+        contact = db.create_contact(phone="5511888888888", push_name="João")
+        db.contacts[contact.id]["ia_ativa"] = False
+        router = FakeClient(WHATSAPP)
+
+        result = handle_admin_message(
+            "5511900000001", "reativar joao", db, router, contact_id=1
+        )
+
+        self.assertIn("Bot reativado", result["reply"])
+        self.assertTrue(db.contacts[contact.id]["ia_ativa"])
+
+    def test_unaccented_stored_name_found_by_accented_query(self):
+        db = FakeDatabase()
+        contact = db.create_contact(phone="5511888888888", push_name="Joao")
+        db.contacts[contact.id]["ia_ativa"] = False
+        router = FakeClient(WHATSAPP)
+
+        result = handle_admin_message(
+            "5511900000001", "reativar joão", db, router, contact_id=1
+        )
+
+        self.assertIn("Bot reativado", result["reply"])
+        self.assertTrue(db.contacts[contact.id]["ia_ativa"])
+
+
 if __name__ == "__main__":
     unittest.main()
