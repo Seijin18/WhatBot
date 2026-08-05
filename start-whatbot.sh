@@ -19,9 +19,9 @@ if pgrep -f "whatbot-docker-daemon" > /dev/null 2>&1; then
     sleep 2
 fi
 
-# Inicia o docker-compose em background com nome identificável
+# Inicia o docker compose em background com nome identificável
 echo "🚀 Iniciando WhatBot..."
-nohup bash -c "cd '$PROJECT_DIR' && exec docker-compose up" > "$LOG_FILE" 2>&1 &
+nohup bash -c "cd '$PROJECT_DIR' && exec docker compose up" > "$LOG_FILE" 2>&1 &
 PID=$!
 
 # Renomeia o processo para um nome identificável

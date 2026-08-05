@@ -8,10 +8,10 @@ PID_FILE="$PROJECT_DIR/.whatbot-pid"
 
 echo "🛑 Parando WhatBot..."
 
-# Tenta parar via docker-compose primeiro (mais limpo)
+# Tenta parar via docker compose primeiro (mais limpo)
 if [ -d "$PROJECT_DIR" ] && [ -f "$PROJECT_DIR/docker-compose.yml" ]; then
     cd "$PROJECT_DIR"
-    docker-compose down 2>/dev/null
+    docker compose down 2>/dev/null
 fi
 
 # Mata o processo se ainda estiver rodando
@@ -27,8 +27,8 @@ if [ -f "$PID_FILE" ]; then
     rm "$PID_FILE"
 fi
 
-# Mata qualquer processo docker-compose remanescente
-pkill -f "docker-compose up" 2>/dev/null
+# Mata qualquer processo docker compose remanescente
+pkill -f "docker compose up" 2>/dev/null
 
 echo "✅ WhatBot parado"
 echo ""
