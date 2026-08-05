@@ -548,6 +548,32 @@ class TestAdminSimulation(MainE2ETestCase):
         self.assertEqual(result["simulated_as"], IGSID)
         # The simulated customer is never really messaged...
         self.assert_nothing_sent_on(self.ig)
+
+    def test_simulated_handover_reports_readable_text_not_a_raw_dict(self):
+        """Regression: a real production incident — an admin's own phone
+        number was also `ADMIN_NOTIFY_PHONES`, so a genuine WhatsApp catalog
+        order got intercepted by the admin router and fell into
+        `run_admin_simulation` instead of `catalog-order-capture`'s real
+        path. That turn ended in a handover with no `model_reply` (the LLM
+        is never called for a catalog-order handover), and the old fallback
+        chain (`model_reply` or `message` or `str(result)`) dumped the raw
+        internal result dict straight into the admin's WhatsApp. This pins
+        that a handover-only turn (no LLM reply at all) now reports a
+        readable customer-facing text instead."""
+        result = main_mod.run_admin_simulation(
+            ADMIN_PHONE, CUSTOMER_PHONE, "quero falar com a secretaria"
+        )
+
+        self.assertTrue(result["handed_to_human"])
+        admin_sends = [m for m in self.wa.sent if m["to"] == ADMIN_PHONE]
+        self.assertEqual(len(admin_sends), 1)
+        reported_text = admin_sends[0]["text"]
+        self.assertNotIn("{'ok':", reported_text)
+        self.assertNotIn("{\"ok\":", reported_text)
+        self.assertIn("Handover simulado", reported_text)
+        # The actual handover message a real customer would have seen —
+        # not the internal result dict.
+        self.assertIn("atendente", reported_text.lower())
         # ...but the admin gets the transcript back on the admin channel.
         self.assertEqual(len(self.wa.sent), 1)
         self.assertEqual(self.wa.sent[0]["to"], ADMIN_PHONE)

@@ -154,4 +154,13 @@ def executar_handover_para_secretaria(
         "prioridade": prioridade,
         "admin_notify": notify_result,
         "long_wait_check": long_wait_result,
+        # The text a real customer would see for this turn — every branch of
+        # `process_customer_message` that can produce a customer-facing reply
+        # DEVE preencher esta chave (não só `model_reply`, que só existe no
+        # caminho de resposta direta da LLM). É o que permite que
+        # `run_admin_simulation` só decore o texto, sem adivinhar qual chave
+        # do result carrega a resposta (openspec/project.md não documenta
+        # isso ainda — nasceu de um bug real de simulação despejando o dict
+        # cru quando o turno terminava em handover sem `model_reply`).
+        "customer_reply_text": handover_text,
     }

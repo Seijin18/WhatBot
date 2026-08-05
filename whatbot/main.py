@@ -230,7 +230,22 @@ def run_admin_simulation(
         history_override=history_override,
         session_override=session_override,
     )
-    reply = result.get("model_reply") or result.get("message") or str(result)
+    # `customer_reply_text` is the normalized field every reply-producing
+    # branch of `process_customer_message`/`executar_handover_para_secretaria`
+    # fills in with exactly what a real customer would have seen this turn —
+    # this function only decorates it, it never has to know which internal
+    # branch produced it. `message` remains as a fallback for branches that
+    # never generate customer-facing text at all (e.g. the `ia_ativa=False`
+    # early return, which is informational to the admin, not a reply).
+    # `str(result)` was removed on purpose: it used to leak the raw internal
+    # result dict straight to WhatsApp whenever a branch didn't populate
+    # either key (found via a real handover-in-simulation turn that had
+    # neither `model_reply` nor `message` — see git history for the report).
+    reply = (
+        result.get("customer_reply_text")
+        or result.get("message")
+        or "(sem texto de resposta ao cliente neste turno)"
+    )
     if result.get("handed_to_human"):
         reply = (
             f"{reply}\n\n_(Handover simulado — o bot pararia de responder a este cliente.)_"
@@ -299,7 +314,14 @@ def _continue_admin_simulation(
     # return, fall back to the previous state so memory simply doesn't
     # advance instead of being wiped.
     new_session_state = result.get("session_state") or state.get("session_state") or {}
-    reply_text = result.get("model_reply") or result.get("message") or ""
+    # Same normalized field `run_admin_simulation` uses to decorate the reply
+    # sent to the admin — without it, a turn that ended in handover (no
+    # `model_reply`) used to drop out of the simulated conversation's
+    # history entirely (`reply_text = ""`), silently losing that turn's
+    # content for the LLM context on the next message.
+    reply_text = (
+        result.get("customer_reply_text") or result.get("message") or ""
+    )
     new_history = (
         [{"direction": "out", "text": reply_text}, {"direction": "in", "text": text}]
         + (state.get("history") or [])
@@ -971,6 +993,12 @@ def process_customer_message(
         "ok": True,
         "sent": True,
         "model_reply": model_reply,
+        # See `whatbot/domain.py::executar_handover_para_secretaria` for why
+        # this key exists: the normalized "what the customer would see this
+        # turn" field every reply-producing branch fills in, so callers
+        # (`run_admin_simulation`) never have to guess between `model_reply`
+        # and whatever a handover branch happens to call its text.
+        "customer_reply_text": model_reply,
         "queue_check": queue_check,
         "simulated": simulated,
         "intent": intent_result.intent,
