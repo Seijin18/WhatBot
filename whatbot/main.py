@@ -18,12 +18,14 @@ from .config import (
     ENV_DB_DSN,
     ENV_EVOLUTION_API_KEY,
     ENV_EVOLUTION_API_INSTANCE_NAME,
+    WHATSAPP_PROVIDER_CLOUD,
     bootstrap_env,
     is_placeholder,
     is_test_mode,
     resolve_db_dsn,
     resolve_evolution_base_url,
     resolve_simulate_phone,
+    resolve_whatsapp_provider,
     should_respond_to_customer,
 )
 from .channels import (
@@ -33,6 +35,7 @@ from .channels import (
     ChannelRouter,
     EvolutionApiClient,
     UnknownChannelError,
+    WhatsAppCloudClient,
     normalize_channel,
     send_to_contact,
     validate_channel,
@@ -128,6 +131,32 @@ def _register_instagram_client_if_configured(router: ChannelRouter, db: Database
     )
 
 
+def _register_whatsapp_cloud_client(router: ChannelRouter, db: Database) -> None:
+    """Register `WhatsAppCloudClient` from `canal_credenciais`, failing loud.
+
+    Deliberately asymmetric with `_register_instagram_client_if_configured`
+    (Instagram is an optional secondary channel, silently skipped if
+    unconfigured): WhatsApp is `DEFAULT_CHANNEL`/`ADMIN_CHANNEL` — the
+    operator explicitly opted into `WHATSAPP_PROVIDER=cloud`, so a missing
+    credential here is a startup misconfiguration, not "feature not enabled
+    yet". Must fail the same way `EVOLUTION_API_KEY` missing already does
+    for the `evolution` provider, not silently leave the entire bot
+    (including admin notifications) without a WhatsApp channel.
+    """
+    credential = db.get_channel_credential(WHATSAPP)
+    if credential is None or not credential.account_id:
+        raise RuntimeError(
+            "WHATSAPP_PROVIDER=cloud mas canal_credenciais não tem "
+            "access_token/account_id (phone_number_id) para canal='whatsapp'"
+        )
+    router.register(
+        WhatsAppCloudClient(
+            access_token=credential.access_token,
+            phone_number_id=credential.account_id,
+        )
+    )
+
+
 def _init_infra() -> None:
     global _db, _router, _llm
     bootstrap_env()
@@ -138,21 +167,38 @@ def _init_infra() -> None:
         _db = Database(dsn)
         _db.ensure_schema()
     if _router is None:
-        api_key = os.getenv(ENV_EVOLUTION_API_KEY)
-        instance_name = os.getenv(ENV_EVOLUTION_API_INSTANCE_NAME)
-        base_url = resolve_evolution_base_url(os.getenv("EVOLUTION_API_BASE_URL"))
-        if is_placeholder(api_key) or is_placeholder(instance_name):
-            raise RuntimeError(
-                "EVOLUTION_API_KEY ou EVOLUTION_API_INSTANCE_NAME não configurados"
+        # Built and populated in a local first, only assigned to the module
+        # global at the very end — so a `RuntimeError` from either provider
+        # branch below (missing Evolution env vars, missing Cloud API
+        # credential) leaves `_router` as `None`, same as before this
+        # provider branch existed. A partially-built router assigned early
+        # would make `if _router is None` skip retrying on the next call,
+        # silently stranding the bot without a WhatsApp client even after
+        # the operator fixes the misconfiguration.
+        provider = resolve_whatsapp_provider()
+        router = ChannelRouter()
+        if provider == WHATSAPP_PROVIDER_CLOUD:
+            _register_whatsapp_cloud_client(router, _db)
+        else:
+            api_key = os.getenv(ENV_EVOLUTION_API_KEY)
+            instance_name = os.getenv(ENV_EVOLUTION_API_INSTANCE_NAME)
+            base_url = resolve_evolution_base_url(os.getenv("EVOLUTION_API_BASE_URL"))
+            if is_placeholder(api_key) or is_placeholder(instance_name):
+                raise RuntimeError(
+                    "EVOLUTION_API_KEY ou EVOLUTION_API_INSTANCE_NAME não configurados"
+                )
+            router.register(
+                EvolutionApiClient(
+                    api_key=api_key, instance_name=instance_name, base_url=base_url
+                )
             )
-        _router = ChannelRouter()
-        _router.register(
-            EvolutionApiClient(
-                api_key=api_key, instance_name=instance_name, base_url=base_url
-            )
+        _register_instagram_client_if_configured(router, _db)
+        _router = router
+        logger.info(
+            "Canais ativos: %s (whatsapp provider=%s)",
+            ", ".join(_router.channels),
+            provider,
         )
-        _register_instagram_client_if_configured(_router, _db)
-        logger.info("Canais ativos: %s", ", ".join(_router.channels))
     if _llm is None:
         _llm = create_llm_client()
     if is_test_mode():
@@ -938,14 +984,16 @@ def process_customer_message(
                 source="bot",
                 contact_id=contact.id,
             )
-            if canal == INSTAGRAM:
-                # Requirement "Alertas de saúde da integração": the real
-                # send path is the only place a consecutive-failure streak
-                # can be observed (critic BLOQUEADOR 1 — previously nothing
-                # called this outside of tests, so the alert never fired in
-                # production). `record_send_result` is best-effort and never
-                # raises.
-                record_send_result(_db, _router, canal, success=True)
+            # Requirement "Alertas de saúde da integração" (whatsapp-send-resilience:
+            # generalized from Instagram-only — canal_envio_falhas was
+            # already generic by `canal`, only this call site restricted
+            # it). The real send path is the only place a
+            # consecutive-failure streak can be observed (critic
+            # BLOQUEADOR 1 — previously nothing called this outside of
+            # tests for Instagram, so the alert never fired in
+            # production). `record_send_result` is best-effort and never
+            # raises.
+            record_send_result(_db, _router, canal, success=True)
         else:
             log_outbound(
                 phone,
@@ -959,8 +1007,7 @@ def process_customer_message(
             logger.info("Simulação: resposta não enviada ao cliente fictício %s", phone)
     except ChannelError as e:
         logger.exception("Falha de entrega no canal %s: %s", e.canal, e)
-        if e.canal == INSTAGRAM:
-            record_send_result(_db, _router, e.canal, success=False)
+        record_send_result(_db, _router, e.canal, success=False)
         return {
             "ok": False,
             "error": "send_failed",

@@ -695,6 +695,52 @@ class TestPauseCommand(unittest.TestCase):
         self.assertTrue(db.get_contact_by_phone("5511888888888").ia_ativa)
 
 
+class TestCompleteReactivatesBotImmediately(unittest.TestCase):
+    """`admin-attend-keeps-bot-active`: finalizar um atendimento (item
+    único ou em lote) não deixa mais o bot desligado por
+    `AUTO_REACTIVATE_HOURS` — reativa `ia_ativa` na hora, sem
+    `bot_resume_at`."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"ADMIN_NOTIFY_PHONES": "5511900000001"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_complete_single_item_reactivates_bot_immediately(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        contact = db.create_contact(phone="5511888888888", push_name="Pedro")
+        db.enroll_handover(contact.id, motivo="pedido_do_cliente")
+
+        result = handle_admin_message(
+            "5511900000001", "atendi o Pedro", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("h*", result["reply"])
+        updated = db.get_contact_by_phone("5511888888888")
+        self.assertTrue(updated.ia_ativa)
+        self.assertIsNone(db.contacts[contact.id]["bot_resume_at"])
+
+    def test_complete_all_reactivates_every_contact_immediately(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        pedro = db.create_contact(phone="5511888888888", push_name="Pedro")
+        maria = db.create_contact(phone="5511777777777", push_name="Maria")
+        db.enroll_handover(pedro.id, motivo="pedido_do_cliente")
+        db.enroll_handover(maria.id, motivo="pedido_do_cliente")
+
+        result = handle_admin_message(
+            "5511900000001", "atender todos", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(db.get_contact_by_phone("5511888888888").ia_ativa)
+        self.assertTrue(db.get_contact_by_phone("5511777777777").ia_ativa)
+        self.assertIsNone(db.contacts[pedro.id]["bot_resume_at"])
+        self.assertIsNone(db.contacts[maria.id]["bot_resume_at"])
+
+
 class TestReactivateAccentFold(unittest.TestCase):
     """`search_contacts_for_admin` must fold accents on both sides of the
     comparison — the admin's typed query *and* the stored `push_name` —

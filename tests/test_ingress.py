@@ -28,17 +28,25 @@ VERIFY_TOKEN = "test-verify-token"
 IGSID = "17841400000000000"
 PAGE_ID = "17841400000000009"
 
+WA_SECRET = "test-wa-app-secret"
+WA_VERIFY_TOKEN = "test-wa-verify-token"
+WA_PHONE = "16315551234"
+WA_PHONE_NUMBER_ID = "1234567890"
+WA_WABA_ID = "9876543210"
+
 ENV = {
     "IG_APP_SECRET": SECRET,
     "IG_WEBHOOK_VERIFY_TOKEN": VERIFY_TOKEN,
+    "WA_CLOUD_APP_SECRET": WA_SECRET,
+    "WA_CLOUD_WEBHOOK_VERIFY_TOKEN": WA_VERIFY_TOKEN,
     "ADMIN_NOTIFY_PHONES": "5511900000001",
     "TEST_MODE": "false",
     "GEMINI_API_KEY": "test-key",
 }
 
 
-def _sign(body: bytes) -> str:
-    digest = hmac.new(SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
+def _sign(body: bytes, secret: str = SECRET) -> str:
+    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
     return f"sha256={digest}"
 
 
@@ -55,6 +63,74 @@ def _message_body(message_id: str = "mid-1", text: str = "oi, tem yoga?") -> byt
                         "recipient": {"id": PAGE_ID},
                         "timestamp": 1753700000,
                         "message": {"mid": message_id, "text": text},
+                    }
+                ],
+            }
+        ],
+    }
+    return json.dumps(payload).encode("utf-8")
+
+
+def _wa_message_body(message_id: str = "wamid.1", text: str = "oi, tem yoga?") -> bytes:
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": WA_WABA_ID,
+                "changes": [
+                    {
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {
+                                "display_phone_number": "15550001111",
+                                "phone_number_id": WA_PHONE_NUMBER_ID,
+                            },
+                            "contacts": [
+                                {"profile": {"name": "Kerry"}, "wa_id": WA_PHONE}
+                            ],
+                            "messages": [
+                                {
+                                    "from": WA_PHONE,
+                                    "id": message_id,
+                                    "timestamp": "1753700000",
+                                    "type": "text",
+                                    "text": {"body": text},
+                                }
+                            ],
+                        },
+                        "field": "messages",
+                    }
+                ],
+            }
+        ],
+    }
+    return json.dumps(payload).encode("utf-8")
+
+
+def _wa_status_body(status_id: str = "wamid.status-1") -> bytes:
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": WA_WABA_ID,
+                "changes": [
+                    {
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {
+                                "display_phone_number": "15550001111",
+                                "phone_number_id": WA_PHONE_NUMBER_ID,
+                            },
+                            "statuses": [
+                                {
+                                    "id": status_id,
+                                    "status": "delivered",
+                                    "timestamp": "1753700001",
+                                    "recipient_id": WA_PHONE,
+                                }
+                            ],
+                        },
+                        "field": "messages",
                     }
                 ],
             }
@@ -302,6 +378,117 @@ class TestMalformedHeaderIsRejectedNotCrashed(IngressTestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(len(background_tasks.tasks), 0)
+
+
+class TestWhatsAppWebhook(IngressTestCase):
+    """`whatsapp-cloud-channel-client`: same Meta handshake/signature
+    protocol as Instagram (`verify_handshake`/`verify_signature` are
+    product-agnostic, see `whatbot/ingress.py` module docstring), reused for
+    the `/webhook/whatsapp` route added alongside `/webhook/instagram`."""
+
+    def test_valid_token_echoes_the_challenge(self):
+        response = self.client.get(
+            "/webhook/whatsapp",
+            params={
+                "hub.mode": "subscribe",
+                "hub.verify_token": WA_VERIFY_TOKEN,
+                "hub.challenge": "654321",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.text, "654321")
+
+    def test_invalid_token_is_rejected(self):
+        response = self.client.get(
+            "/webhook/whatsapp",
+            params={
+                "hub.mode": "subscribe",
+                "hub.verify_token": "wrong",
+                "hub.challenge": "654321",
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_missing_signature_is_rejected_and_nothing_is_processed(self):
+        body = _wa_message_body()
+
+        response = self.client.post(
+            "/webhook/whatsapp", content=body, headers={"Content-Type": "application/json"}
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.wa.sent, [])
+        self.assertEqual(self.db.contacts, {})
+
+    def test_invalid_signature_is_rejected_and_nothing_is_processed(self):
+        body = _wa_message_body()
+
+        response = self.client.post(
+            "/webhook/whatsapp",
+            content=body,
+            headers={"X-Hub-Signature-256": "sha256=" + "0" * 64},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.wa.sent, [])
+
+    def test_valid_signature_confirms_and_processes(self):
+        body = _wa_message_body()
+
+        response = self.client.post(
+            "/webhook/whatsapp",
+            content=body,
+            headers={"X-Hub-Signature-256": _sign(body, WA_SECRET)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.wa.sent), 1)
+        self.assertEqual(self.wa.sent[0]["to"], WA_PHONE)
+
+    def test_status_only_post_schedules_no_background_task(self):
+        # A `statuses` batch (delivery/read ack) must not generate a reply —
+        # see `whatbot/whatsapp_cloud_webhook.py` KIND_STATUS.
+        body = _wa_status_body()
+        request = asyncio.run(
+            _build_request(body, {"X-Hub-Signature-256": _sign(body, WA_SECRET)})
+        )
+        background_tasks = BackgroundTasks()
+
+        response = asyncio.run(ingress.receive_whatsapp_webhook(request, background_tasks))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(background_tasks.tasks), 0)
+        self.assertEqual(self.wa.sent, [])
+
+    def test_message_post_schedules_one_task_per_message(self):
+        body = _wa_message_body()
+        request = asyncio.run(
+            _build_request(body, {"X-Hub-Signature-256": _sign(body, WA_SECRET)})
+        )
+        background_tasks = BackgroundTasks()
+
+        response = asyncio.run(ingress.receive_whatsapp_webhook(request, background_tasks))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(background_tasks.tasks), 1)
+
+    def test_second_delivery_of_the_same_event_is_discarded_without_error(self):
+        body = _wa_message_body(message_id="wamid.dup")
+
+        first = self.client.post(
+            "/webhook/whatsapp",
+            content=body,
+            headers={"X-Hub-Signature-256": _sign(body, WA_SECRET)},
+        )
+        second = self.client.post(
+            "/webhook/whatsapp",
+            content=body,
+            headers={"X-Hub-Signature-256": _sign(body, WA_SECRET)},
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(len(self.wa.sent), 1, "a reentrega não deve gerar um segundo envio")
 
 
 if __name__ == "__main__":

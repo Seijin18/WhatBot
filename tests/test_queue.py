@@ -9,6 +9,7 @@ from whatbot.queue import (
     build_contact_summary,
     build_daily_summary,
     format_waiting_list,
+    handle_staff_outgoing_message,
     normalize_phone,
     notify_assumption,
     process_new_handover,
@@ -645,6 +646,26 @@ class TestFormatWaitingListUsesContactSummary(unittest.TestCase):
         self.assertIn("Fila", text)
         self.assertIn("Maria", text)
         self.assertIn("Total na fila: 1", text)
+
+
+class TestStaffOutgoingReactivatesBotImmediately(unittest.TestCase):
+    """`admin-attend-keeps-bot-active`: quando a secretaria responde direto
+    pelo WhatsApp Business, o contato sai da fila com `ia_ativa=True` e
+    `bot_resume_at=None` na hora, sem esperar `AUTO_REACTIVATE_HOURS`."""
+
+    def test_staff_reply_reactivates_bot_immediately(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        contact = db.create_contact(phone="5511888888888", push_name="Pedro")
+        db.enroll_handover(contact.id, motivo="pedido_do_cliente")
+
+        result = handle_staff_outgoing_message("5511888888888", db, router)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result.get("auto_attended"))
+        updated = db.get_contact_by_phone("5511888888888")
+        self.assertTrue(updated.ia_ativa)
+        self.assertIsNone(db.contacts[contact.id]["bot_resume_at"])
 
 
 class TestProcessAutoReactivations(unittest.TestCase):

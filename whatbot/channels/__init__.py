@@ -18,6 +18,7 @@ from .base import (
     validate_channel,
 )
 from .router import ChannelRouter, send_admin, send_to_contact
+from .whatsapp_cloud import WhatsAppCloudClient
 from .whatsapp_evolution import EvolutionApiClient, WhatsAppClient
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "InboundMessage",
     "UnknownChannelError",
     "WhatsAppClient",
+    "WhatsAppCloudClient",
     "channel_label",
     "messaging_window",
     "normalize_channel",

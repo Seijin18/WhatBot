@@ -102,6 +102,63 @@ curl.exe -H "apikey: change-me" http://localhost:8080/instance/fetchInstances
 ⏱️ **Quando a instância estiver `close`** → QR code expirou, gere novamente  
 ✅ **Quando a instância estiver `open`** → WhatsApp pareado com sucesso!
 
+## 🔁 Alternativa: WhatsApp Cloud API (oficial da Meta)
+
+A Evolution API (Baileys, passos acima) é uma integração não-oficial e está
+sujeita a instabilidades fora do nosso controle — por exemplo o erro
+`status: 0` / `messageStubParameters: ["463"]` (`NackCallerReachoutTimelocked`,
+um rate-limit de privacidade do WhatsApp), reportado como bug aberto em
+[evolution-foundation/evolution-api#2653](https://github.com/evolution-foundation/evolution-api/issues/2653).
+Para evitar essa classe de problema, o bot também suporta a **API oficial da
+Meta** (WhatsApp Cloud API) como provedor alternativo, sob o mesmo canal
+`"whatsapp"` — ver `openspec/changes/whatsapp-cloud-channel-client/`.
+
+### Pré-requisitos (feitos no Meta Business Manager, fora do código)
+
+1. App na Meta com o produto **WhatsApp** ativado (developers.facebook.com).
+2. Um número de telefone verificado, com seu `phone_number_id`.
+3. Um **System User token** de longa duração (não expira como o token de
+   teste de 24h) com permissão `whatsapp_business_messaging`.
+4. Webhook configurado no painel da Meta apontando para
+   `https://<seu-domínio-público>/webhook/whatsapp`, com o mesmo
+   `WA_CLOUD_WEBHOOK_VERIFY_TOKEN` que você vai colocar no `.env` — mesmo
+   fluxo `hub.challenge` já usado pelo Instagram (ver
+   `whatbot/ingress.py`), servido por `whatbot_ingress`
+   (`docker compose --profile instagram up whatbot-ingress`, ou o serviço
+   equivalente já rodando).
+
+### Configuração no WhatBot
+
+```bash
+# .env
+WHATSAPP_PROVIDER=cloud
+WA_CLOUD_APP_SECRET=<App Secret do app na Meta>
+WA_CLOUD_WEBHOOK_VERIFY_TOKEN=<token arbitrário, o mesmo cadastrado no painel da Meta>
+```
+
+E popular `canal_credenciais` com o token de sistema e o `phone_number_id`
+(não precisa de fluxo OAuth como o Instagram — é um token direto):
+
+```sql
+INSERT INTO canal_credenciais (canal, account_id, access_token)
+VALUES ('whatsapp', '<phone_number_id>', '<system_user_token>')
+ON CONFLICT (canal) DO UPDATE
+SET account_id = EXCLUDED.account_id, access_token = EXCLUDED.access_token;
+```
+
+Reinicie o processo do bot depois de alterar `WHATSAPP_PROVIDER` ou
+`canal_credenciais` — `_init_infra()` só resolve o provedor uma vez, na
+subida do processo.
+
+⚠️ **`WHATSAPP_PROVIDER=cloud` sem credencial em `canal_credenciais` falha
+alto no startup** (`RuntimeError`), de propósito — WhatsApp é o canal padrão
+do bot, então uma credencial ausente é erro de configuração, não uma
+feature opcional desligada (diferente do Instagram, que só fica sem canal
+registrado silenciosamente).
+
+Voltar para `WHATSAPP_PROVIDER=evolution` (ou simplesmente remover a
+variável) restaura o comportamento atual, sem precisar reverter código.
+
 ## 🔌 Passo 2: Configurar Webhook no Windmill
 
 Após parear seu WhatsApp, configure o webhook da Evolution API:
@@ -334,6 +391,24 @@ KEYS *
    2. Escanear com WhatsApp Business
    3. Aguardar até 30 segundos
    4. Verificar status novamente
+```
+
+### "Mensagem enviada aparece OK nos logs mas nunca chega no WhatsApp" (erro 463)
+```
+❌ Problema: Evolution API loga "Sending message to ..." e status 200, mas o
+           WhatsApp do destinatário nunca recebe. No log da Evolution API
+           aparece "status": 0, "messageStubParameters": ["463"].
+🔍 Causa: erro 463 (NackCallerReachoutTimelocked) — rate-limit de privacidade
+         do próprio WhatsApp, comum logo após repareamento de sessão via QR
+         code. Bug conhecido do Baileys/Evolution API, não é um problema do
+         whatbot — ver evolution-foundation/evolution-api#2653.
+✅ Solução:
+   1. Evitar deletar/recriar a instância repetidamente — cada repareamento
+      reinicia o time-lock.
+   2. Esperar (minutos a poucas horas) e testar de novo.
+   3. Se persistir, considerar migrar para a WhatsApp Cloud API oficial
+      (seção "Alternativa: WhatsApp Cloud API" acima), que não tem essa
+      classe de bug.
 ```
 
 ### "Database connection failed"

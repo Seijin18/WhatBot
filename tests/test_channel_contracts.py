@@ -23,6 +23,7 @@ from whatbot.channels import (
     validate_channel,
 )
 from whatbot.channels.instagram import InstagramClient
+from whatbot.channels.whatsapp_cloud import WhatsAppCloudClient
 from whatbot.channels.whatsapp_evolution import EvolutionApiClient
 from whatbot.webhook import parse_evolution_payload
 
@@ -202,6 +203,42 @@ class TestInstagramClientProtocolAlignment(unittest.TestCase):
     def test_router_accepts_the_instagram_client_too(self):
         router = ChannelRouter([self.client])
         self.assertIs(router.client_for(INSTAGRAM), self.client)
+
+
+class TestWhatsAppCloudClientProtocolAlignment(unittest.TestCase):
+    """The Cloud API client must satisfy `ChannelClient` the same way the
+    Evolution client does — see design.md "Decisão: mesmo canal whatsapp":
+    they are interchangeable behind the same `canal`, never both registered
+    at once."""
+
+    def setUp(self):
+        self.client = WhatsAppCloudClient(
+            access_token="wa-token",
+            phone_number_id="1234567890",
+            base_url="https://graph.facebook.com",
+        )
+
+    def test_client_satisfies_the_channel_client_protocol(self):
+        from whatbot.channels import ChannelClient
+
+        self.assertIsInstance(self.client, ChannelClient)
+
+    def test_declares_the_whatsapp_channel(self):
+        self.assertEqual(self.client.canal, WHATSAPP)
+
+    def test_recipient_can_be_passed_by_keyword(self):
+        from unittest.mock import MagicMock, patch
+
+        response = MagicMock(ok=True)
+        response.json.return_value = {}
+        with patch(
+            "whatbot.channels.whatsapp_cloud.requests.post", return_value=response
+        ), patch("whatbot.channels.whatsapp_cloud.log_outbound"):
+            self.client.send_text(to=PHONE, text="oi")
+
+    def test_router_accepts_the_cloud_client_too(self):
+        router = ChannelRouter([self.client])
+        self.assertIs(router.client_for(WHATSAPP), self.client)
 
 
 if __name__ == "__main__":
