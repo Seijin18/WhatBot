@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 
 from .admin_nlu import parse_admin_intent
-from .config import AUTO_REACTIVATE_HOURS, get_business_phone, resolve_simulate_phone
+from .config import get_business_phone, resolve_simulate_phone
 from .contact_resolver import (
     extract_phone_from_text,
     find_waiting_matches,
@@ -120,7 +120,7 @@ Se houver *duas Marias*, o bot pergunta qual delas (responda *1*, *2* ou o telef
 • `#simular Olá` (usa número de teste padrão)
 {warning}
 *Automações:*
-• Responder um cliente → sai da fila; bot reativa sozinho em *{AUTO_REACTIVATE_HOURS}h*
+• Responder um cliente → sai da fila e o bot já volta a responder na hora
 • Alertas de fila continuam automáticos
 """
 
@@ -198,9 +198,8 @@ def _execute_action(
     if acao == "complete":
         if db.mark_attended(
             target.external_id,
-            reativar_bot=False,
+            reativar_bot=True,
             assumido_por=admin_phone,
-            schedule_resume_hours=AUTO_REACTIVATE_HOURS,
             canal=target.canal,
         ):
             return _reply(
@@ -208,7 +207,7 @@ def _execute_action(
                 db,
                 admin_phone,
                 contact_id,
-                f"✅ *{label}* atendido. Bot reativa automaticamente em {AUTO_REACTIVATE_HOURS}h.",
+                f"✅ *{label}* atendido. Bot já está ativo de novo.",
             )
         return _reply(
             router, db, admin_phone, contact_id, f"{label} não está na fila."
@@ -590,16 +589,15 @@ def handle_admin_message(
 
     if intent.action == "complete_all":
         count = db.mark_all_attended(
-            reativar_bot=False,
+            reativar_bot=True,
             assumido_por=admin_phone,
-            schedule_resume_hours=AUTO_REACTIVATE_HOURS,
         )
         return _reply(
             router,
             db,
             admin_phone,
             contact_id,
-            f"✅ {count} contato(s) atendidos. Bots reativam em {AUTO_REACTIVATE_HOURS}h.",
+            f"✅ {count} contato(s) atendidos. Bots já estão ativos de novo.",
         )
 
     if intent.action == "assume" and intent.query:

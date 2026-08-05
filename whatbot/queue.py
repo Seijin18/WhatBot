@@ -9,7 +9,6 @@ from typing import Any, List
 from zoneinfo import ZoneInfo
 
 from .config import (
-    AUTO_REACTIVATE_HOURS,
     DAILY_SUMMARY_HOUR,
     NOTIFY_IMMEDIATE_ON_HANDOVER,
     NOTIFY_ON_ASSUMIR,
@@ -390,15 +389,14 @@ def handle_staff_outgoing_message(
 
     if db.mark_attended(
         to_phone,
-        reativar_bot=False,
+        reativar_bot=True,
         assumido_por="whatsapp_business",
-        schedule_resume_hours=AUTO_REACTIVATE_HOURS,
     ):
         name = waiting.push_name or to_phone
         notify_admin(
             router,
             f"✅ *{name}* ({to_phone}) atendido via WhatsApp Business.\n"
-            f"Bot reativa automaticamente em {AUTO_REACTIVATE_HOURS}h.",
+            "Bot já está ativo de novo.",
         )
         logger.info("Auto-atendido após resposta WhatsApp Business: %s", to_phone)
         return {"ok": True, "auto_attended": True, "phone": to_phone}
