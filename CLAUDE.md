@@ -26,6 +26,15 @@ Exemplos concretos deste projeto:
 qualquer coisa cujo conteúdo exato/bruto seja necessário para o próximo passo
 (ex.: ler um arquivo antes de editar — use `Read`, não o sandbox).
 
+**Assinatura real de `ctx_execute`** (erro comum, já cometido nesta sessão):
+o parâmetro é `language` (`python`/`shell`/`javascript`/...) + `code` — um
+trecho de código a executar dentro do sandbox — **não** um `command` de
+shell solto nem um `intent` livre. Para um one-liner de shell (ex.: um
+`grep -n` pontual), ou passe `language: "shell"` com `code` sendo o comando
+completo, ou simplesmente use `Bash` direto quando o comando for curto (ver
+"Quando NÃO usar" acima) — não tente adivinhar um schema alternativo antes
+de checar a definição real da ferramenta.
+
 ## MCP Codebase Memory
 
 O MCP `codebase-memory` também está habilitado neste projeto (`.mcp.json`).
@@ -48,6 +57,12 @@ exploração, por exemplo:
 Para busca textual simples (uma string exata, um TODO específico), `grep`/
 `Explore` continua sendo mais direto — o grafo é para relações, não substitui
 busca literal.
+
+**Argumento `project` é obrigatório** (erro comum, já cometido nesta sessão):
+`index_status`, `get_architecture`, `search_code`, `search_graph`,
+`query_graph`, `trace_path` etc. todos exigem `project` com o nome exato
+indexado — não adivinhe o nome. Rode `list_projects` primeiro se não tiver
+certeza; para este repositório hoje é `home-marshibs-Projects-WhatBot`.
 
 ## OpenSpec
 
