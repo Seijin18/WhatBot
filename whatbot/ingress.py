@@ -30,10 +30,11 @@ import hmac
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any, Dict, List
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from .channels import ChannelError, INSTAGRAM, WHATSAPP, send_to_contact
 from .config import (
@@ -263,6 +264,25 @@ def _check_admin_auth(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="token inválido")
 
 
+_ADMIN_UI_PATH = Path(__file__).parent / "static" / "admin_ui.html"
+
+
+@app.get("/admin/ui")
+def admin_ui() -> HTMLResponse:
+    """Visualizador de conversas **temporário** (sem build, um único HTML
+    servido pela mesma origem da API — evita configurar CORS).
+
+    Autenticação acontece no próprio front-end: a página pede o
+    `ADMIN_API_TOKEN` e guarda em `localStorage` do navegador, enviando-o
+    como `Authorization: Bearer` em cada chamada às rotas `/admin/*`
+    abaixo. Destinado a uso interno/local até o painel definitivo
+    (`camu-web-admin`) assumir essa tela — não tem o cuidado de nunca expor
+    o token ao browser que as demais integrações (`camu-web-admin`) devem
+    ter, porque aqui o próprio browser É o cliente.
+    """
+    return HTMLResponse(_ADMIN_UI_PATH.read_text(encoding="utf-8"))
+
+
 @app.get("/admin/conversas")
 def list_conversas(authorization: str | None = Header(None)) -> Dict[str, Any]:
     """Lista contatos com última mensagem/preview (Requirement "Histórico
@@ -284,6 +304,22 @@ def get_conversa_mensagens(
     _check_admin_auth(authorization)
     db, _router = get_infra()
     mensagens = db.get_conversation(contact_id, limit=limit, before=before)
+
+    def _media_summary(media_id: int | None) -> Dict[str, Any] | None:
+        # N+1 por página é aceitável aqui: uso só do admin, volume baixo
+        # (não é o caminho de atendimento em tempo real).
+        if media_id is None:
+            return None
+        media_file = db.get_media_file(media_id)
+        if media_file is None:
+            return None
+        return {
+            "id": media_file.id,
+            "tipo": media_file.tipo,
+            "mime_type": media_file.mime_type,
+            "status": media_file.status,
+        }
+
     return {
         "ok": True,
         "mensagens": [
@@ -296,6 +332,7 @@ def get_conversa_mensagens(
                 "message_id": m.message_id,
                 "payload": m.payload,
                 "media_id": m.media_id,
+                "media": _media_summary(m.media_id),
             }
             for m in mensagens
         ],

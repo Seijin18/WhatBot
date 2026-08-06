@@ -549,6 +549,8 @@ class TestAdminConversationRoutes(IngressTestCase):
             contact_id=contact.id,
             canal=WHATSAPP,
             tipo="audio",
+            mime_type="audio/ogg",
+            status="baixado",
             storage_key="whatsapp/2026/08/1/a.ogg",
         )
         self.db.save_message(
@@ -569,7 +571,22 @@ class TestAdminConversationRoutes(IngressTestCase):
         mensagens = response.json()["mensagens"]
         self.assertEqual(len(mensagens), 1)
         self.assertEqual(mensagens[0]["payload"], {"raw": True})
-        self.assertEqual(mensagens[0]["media_id"], media_id)
+        # Necessário para o front-end (whatbot/static/admin_ui.html) saber
+        # renderizar áudio/imagem/vídeo sem um segundo round-trip.
+        self.assertEqual(
+            mensagens[0]["media"],
+            {"id": media_id, "tipo": "audio", "mime_type": "audio/ogg", "status": "baixado"},
+        )
+
+    def test_message_without_media_has_null_media_field(self):
+        contact = self.db.create_contact(phone="5511999999999", canal=WHATSAPP)
+        self.db.save_message(contact.id, direction="in", text="oi")
+
+        response = self.client.get(
+            f"/admin/conversas/{contact.id}/mensagens", headers=self._auth()
+        )
+
+        self.assertIsNone(response.json()["mensagens"][0]["media"])
 
     def test_pagination_cursor_does_not_repeat_messages(self):
         contact = self.db.create_contact(phone="5511999999999", canal=WHATSAPP)
@@ -592,6 +609,21 @@ class TestAdminConversationRoutes(IngressTestCase):
         ids_first = {m["id"] for m in first_page}
         ids_second = {m["id"] for m in second_page}
         self.assertEqual(ids_first & ids_second, set())
+
+
+class TestAdminUIRoute(IngressTestCase):
+    """`GET /admin/ui` (visualizador temporário, `whatbot/static/admin_ui.html`).
+
+    Sem autenticação na própria rota — o HTML pede o token e o usa nas
+    chamadas às rotas `/admin/*` de dados, do lado do cliente."""
+
+    def test_serves_the_html_page_without_requiring_a_token(self):
+        response = self.client.get("/admin/ui")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/html", response.headers["content-type"])
+        self.assertIn("ADMIN_API_TOKEN", response.text)
+        self.assertIn("/admin/conversas", response.text)
 
 
 class TestAdminMediaRoute(IngressTestCase):

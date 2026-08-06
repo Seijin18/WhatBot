@@ -1,0 +1,573 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhatBot — Conversas (temporário)</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --border: #e2e4e8;
+    --text: #1c1e21;
+    --muted: #6b7280;
+    --accent: #16a34a;
+    --accent-weak: #dcfce7;
+    --bubble-in: #ffffff;
+    --bubble-out: #dcf8c6;
+    --danger: #dc2626;
+    --danger-weak: #fee2e2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c;
+      --panel: #1f2229;
+      --border: #2c2f36;
+      --text: #e7e9ea;
+      --muted: #9aa0a6;
+      --accent: #22c55e;
+      --accent-weak: #123321;
+      --bubble-in: #2a2d34;
+      --bubble-out: #114226;
+      --danger: #f87171;
+      --danger-weak: #3a1a1a;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  #app { display: flex; height: 100vh; }
+
+  /* -- Gate (token) ----------------------------------------------------- */
+  #gate {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: var(--bg); z-index: 10;
+  }
+  #gate .box {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 28px; width: min(420px, 90vw);
+  }
+  #gate h1 { font-size: 16px; margin: 0 0 6px; }
+  #gate p { color: var(--muted); font-size: 13px; margin: 0 0 16px; line-height: 1.5; }
+  #gate input {
+    width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font-size: 14px; margin-bottom: 10px;
+  }
+  #gate button, .btn {
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 10px 14px; font-size: 14px; cursor: pointer; font-weight: 600;
+  }
+  #gate button:hover, .btn:hover { filter: brightness(1.08); }
+  #gate .err { color: var(--danger); font-size: 12px; margin-top: 8px; min-height: 14px; }
+
+  /* -- Sidebar ------------------------------------------------------------ */
+  #sidebar {
+    width: 320px; min-width: 320px; background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+  }
+  #sidebar header {
+    padding: 14px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  #sidebar header h1 { font-size: 15px; margin: 0; }
+  #sidebar header button {
+    background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px;
+  }
+  #conv-list { flex: 1; overflow-y: auto; }
+  .conv-item {
+    padding: 12px 16px; border-bottom: 1px solid var(--border); cursor: pointer;
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .conv-item:hover { background: var(--bg); }
+  .conv-item.active { background: var(--accent-weak); }
+  .conv-item .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .conv-item .label { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .conv-item .time { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .conv-item .preview { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .badge {
+    font-size: 10px; padding: 1px 6px; border-radius: 999px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .02em;
+  }
+  .badge.bot { background: var(--accent-weak); color: var(--accent); }
+  .badge.human { background: var(--danger-weak); color: var(--danger); }
+  #empty-list { padding: 24px 16px; color: var(--muted); font-size: 13px; text-align: center; }
+
+  /* -- Main / conversation ------------------------------------------------ */
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #conv-header {
+    padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  #conv-header .who { font-weight: 600; font-size: 15px; }
+  #conv-header .meta { font-size: 12px; color: var(--muted); }
+  #placeholder { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 14px; }
+  #messages { flex: 1; overflow-y: auto; padding: 18px 24px; display: flex; flex-direction: column; gap: 10px; }
+  .bubble-row { display: flex; }
+  .bubble-row.out { justify-content: flex-end; }
+  .bubble {
+    max-width: 68%; padding: 8px 12px; border-radius: 10px; font-size: 14px; line-height: 1.45;
+    box-shadow: 0 1px 1px rgba(0,0,0,.06); position: relative; word-wrap: break-word;
+  }
+  .bubble.in { background: var(--bubble-in); border-top-left-radius: 2px; }
+  .bubble.out { background: var(--bubble-out); border-top-right-radius: 2px; }
+  .bubble .ts { display: block; font-size: 10.5px; color: var(--muted); margin-top: 4px; text-align: right; }
+  .bubble .media-wrap { margin-bottom: 6px; }
+  .bubble img.media-img { max-width: 100%; max-height: 260px; border-radius: 6px; display: block; }
+  .bubble audio, .bubble video { max-width: 100%; }
+  .bubble .media-file { font-size: 12.5px; }
+  .bubble .media-pending { font-size: 12px; color: var(--muted); font-style: italic; }
+  .bubble .media-failed { font-size: 12px; color: var(--danger); font-style: italic; }
+  .bubble .payload-toggle {
+    font-size: 10.5px; color: var(--muted); cursor: pointer; margin-top: 4px; display: inline-block;
+  }
+  .bubble pre.payload {
+    font-size: 10.5px; background: rgba(127,127,127,.12); padding: 6px 8px; border-radius: 6px;
+    margin: 4px 0 0; max-width: 360px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+  }
+
+  /* -- Compose ------------------------------------------------------------- */
+  #compose { border-top: 1px solid var(--border); background: var(--panel); padding: 12px 16px; }
+  #compose .row { display: flex; gap: 10px; align-items: flex-end; }
+  #compose textarea {
+    flex: 1; resize: none; border-radius: 10px; border: 1px solid var(--border);
+    padding: 10px 12px; font-size: 14px; font-family: inherit; background: var(--bg); color: var(--text);
+    max-height: 120px; min-height: 40px;
+  }
+  #compose .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  #compose .blocked { font-size: 12.5px; color: var(--danger); padding: 8px 0; }
+  #toast {
+    position: fixed; bottom: 16px; right: 16px; background: var(--panel); border: 1px solid var(--border);
+    padding: 10px 14px; border-radius: 8px; font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,.15);
+    display: none; max-width: 320px;
+  }
+  #toast.error { color: var(--danger); }
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <div class="box">
+    <h1>WhatBot — visualizador de conversas (temporário)</h1>
+    <p>
+      Cole o <code>ADMIN_API_TOKEN</code> configurado no <code>.env</code> do
+      WhatBot. Ele fica só no <code>localStorage</code> deste navegador —
+      não é enviado a nenhum lugar além desta mesma origem.
+    </p>
+    <input id="gate-token" type="password" placeholder="ADMIN_API_TOKEN" autocomplete="off">
+    <button id="gate-submit">Entrar</button>
+    <div class="err" id="gate-err"></div>
+  </div>
+</div>
+
+<div id="app" style="display:none">
+  <div id="sidebar">
+    <header>
+      <h1>Conversas</h1>
+      <button id="logout-btn" title="Trocar token">sair</button>
+    </header>
+    <div id="conv-list"></div>
+  </div>
+  <div id="main">
+    <div id="placeholder">Selecione uma conversa à esquerda</div>
+    <div id="conv-view" style="display:none; flex:1; flex-direction:column; min-height:0;">
+      <div id="conv-header">
+        <div>
+          <div class="who" id="conv-who">—</div>
+          <div class="meta" id="conv-meta">—</div>
+        </div>
+        <button class="btn" id="refresh-btn" style="background:transparent;color:var(--muted);border:1px solid var(--border);font-weight:400;">atualizar</button>
+      </div>
+      <div id="messages"></div>
+      <div id="compose">
+        <div class="row">
+          <textarea id="compose-text" rows="1" placeholder="Escreva uma mensagem…"></textarea>
+          <button class="btn" id="send-btn">Enviar</button>
+        </div>
+        <div class="hint" id="compose-hint"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var TOKEN_KEY = "whatbot_admin_token";
+  var POLL_LIST_MS = 8000;
+  var POLL_MSG_MS = 4000;
+  var MSG_LIMIT = 200;
+
+  var state = {
+    token: localStorage.getItem(TOKEN_KEY) || "",
+    conversas: [],
+    selectedId: null,
+    mensagens: [],
+    mediaUrls: {}, // media_id -> object URL (blob), cached
+  };
+
+  // -- helpers -------------------------------------------------------------
+
+  function $(id) { return document.getElementById(id); }
+
+  function showToast(msg, isError) {
+    var el = $("toast");
+    el.textContent = msg;
+    el.className = isError ? "error" : "";
+    el.style.display = "block";
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(function () { el.style.display = "none"; }, 4000);
+  }
+
+  function apiFetch(path, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({}, opts.headers, {
+      "Authorization": "Bearer " + state.token,
+    });
+    return fetch(path, opts).then(function (res) {
+      if (res.status === 401) {
+        localStorage.removeItem(TOKEN_KEY);
+        state.token = "";
+        showGate("Token inválido ou não configurado.");
+        throw new Error("unauthorized");
+      }
+      return res;
+    });
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    return d.toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  }
+
+  function escapeHtml(s) {
+    return (s || "").replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  // -- gate (token) ----------------------------------------------------------
+
+  function showGate(err) {
+    $("gate").style.display = "flex";
+    $("app").style.display = "none";
+    $("gate-err").textContent = err || "";
+    stopPolling();
+  }
+
+  function hideGate() {
+    $("gate").style.display = "none";
+    $("app").style.display = "flex";
+  }
+
+  $("gate-submit").addEventListener("click", function () {
+    var v = $("gate-token").value.trim();
+    if (!v) { $("gate-err").textContent = "Cole o token."; return; }
+    state.token = v;
+    localStorage.setItem(TOKEN_KEY, v);
+    init();
+  });
+  $("gate-token").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") $("gate-submit").click();
+  });
+  $("logout-btn").addEventListener("click", function () {
+    localStorage.removeItem(TOKEN_KEY);
+    state.token = "";
+    state.selectedId = null;
+    showGate("");
+  });
+
+  // -- conversation list -------------------------------------------------
+
+  function loadConversas() {
+    return apiFetch("/admin/conversas")
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        state.conversas = data.conversas || [];
+        renderConvList();
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") showToast("Falha ao carregar conversas.", true);
+      });
+  }
+
+  function renderConvList() {
+    var list = $("conv-list");
+    if (!state.conversas.length) {
+      list.innerHTML = '<div id="empty-list">Nenhuma conversa ainda.</div>';
+      return;
+    }
+    list.innerHTML = "";
+    state.conversas.forEach(function (c) {
+      var item = document.createElement("div");
+      item.className = "conv-item" + (c.contact_id === state.selectedId ? " active" : "");
+      var prefix = c.ultima_direcao === "out" ? "Você: " : "";
+      item.innerHTML =
+        '<div class="top">' +
+          '<span class="label">' + escapeHtml(c.label || c.external_id || "?") + "</span>" +
+          '<span class="time">' + fmtTime(c.ultima_mensagem_em) + "</span>" +
+        "</div>" +
+        '<div class="preview">' + escapeHtml(prefix + (c.ultima_mensagem || "")) + "</div>" +
+        '<span class="badge ' + (c.ia_ativa ? "bot" : "human") + '">' +
+          (c.ia_ativa ? "bot" : "humano") + " · " + escapeHtml(c.canal || "") +
+        "</span>";
+      item.addEventListener("click", function () { selectConversation(c.contact_id); });
+      list.appendChild(item);
+    });
+  }
+
+  // -- conversation view ---------------------------------------------------
+
+  function selectConversation(id) {
+    state.selectedId = id;
+    $("placeholder").style.display = "none";
+    $("conv-view").style.display = "flex";
+    renderConvList();
+    loadMensagens(true);
+  }
+
+  function currentConv() {
+    return state.conversas.find(function (c) { return c.contact_id === state.selectedId; });
+  }
+
+  function loadMensagens(scrollToBottom) {
+    if (state.selectedId == null) return Promise.resolve();
+    return apiFetch("/admin/conversas/" + state.selectedId + "/mensagens?limit=" + MSG_LIMIT)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        // A API devolve mais recente primeiro; a tela quer ordem cronológica.
+        state.mensagens = (data.mensagens || []).slice().reverse();
+        renderMessages(scrollToBottom);
+        renderComposeState();
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") showToast("Falha ao carregar mensagens.", true);
+      });
+  }
+
+  function renderComposeState() {
+    var conv = currentConv();
+    var who = conv ? (conv.label || conv.external_id) : "";
+    var meta = conv ? (conv.canal + " · " + conv.external_id + " · status: " + conv.status) : "";
+    $("conv-who").textContent = who || "—";
+    $("conv-meta").textContent = meta || "—";
+
+    var hint = $("compose-hint");
+    var textarea = $("compose-text");
+    var sendBtn = $("send-btn");
+    if (conv && conv.ia_ativa) {
+      hint.innerHTML =
+        '<span class="blocked">🤖 O bot está ativo nesta conversa — envie "assumir ' +
+        escapeHtml(conv.external_id || "") +
+        '" pelo WhatsApp do admin para assumir o atendimento antes de responder por aqui.</span>';
+      textarea.disabled = true;
+      sendBtn.disabled = true;
+    } else {
+      hint.textContent = "Enviando como atendente humano.";
+      textarea.disabled = false;
+      sendBtn.disabled = false;
+    }
+  }
+
+  function renderMessages(scrollToBottom) {
+    var wrap = $("messages");
+    var wasAtBottom = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 60;
+    wrap.innerHTML = "";
+    state.mensagens.forEach(function (m) {
+      wrap.appendChild(renderBubble(m));
+    });
+    if (scrollToBottom || wasAtBottom) {
+      wrap.scrollTop = wrap.scrollHeight;
+    }
+  }
+
+  function renderBubble(m) {
+    var row = document.createElement("div");
+    row.className = "bubble-row " + (m.direction === "out" ? "out" : "in");
+
+    var bubble = document.createElement("div");
+    bubble.className = "bubble " + (m.direction === "out" ? "out" : "in");
+
+    if (m.media) {
+      var mediaWrap = document.createElement("div");
+      mediaWrap.className = "media-wrap";
+      mediaWrap.appendChild(renderMedia(m.media));
+      bubble.appendChild(mediaWrap);
+    }
+
+    if (m.text) {
+      var textEl = document.createElement("div");
+      textEl.textContent = m.text;
+      bubble.appendChild(textEl);
+    }
+
+    var ts = document.createElement("span");
+    ts.className = "ts";
+    ts.textContent = fmtTime(m.created_at);
+    bubble.appendChild(ts);
+
+    if (m.payload) {
+      var toggle = document.createElement("span");
+      toggle.className = "payload-toggle";
+      toggle.textContent = "▸ payload bruto";
+      var pre = document.createElement("pre");
+      pre.className = "payload";
+      pre.style.display = "none";
+      pre.textContent = JSON.stringify(m.payload, null, 2);
+      toggle.addEventListener("click", function () {
+        var open = pre.style.display !== "none";
+        pre.style.display = open ? "none" : "block";
+        toggle.textContent = open ? "▸ payload bruto" : "▾ payload bruto";
+      });
+      bubble.appendChild(toggle);
+      bubble.appendChild(pre);
+    }
+
+    row.appendChild(bubble);
+    return row;
+  }
+
+  function renderMedia(media) {
+    if (media.status === "falhou") {
+      var failed = document.createElement("div");
+      failed.className = "media-failed";
+      failed.textContent = "⚠️ falha ao baixar mídia (" + media.tipo + ")";
+      return failed;
+    }
+    if (media.status === "pendente") {
+      var pending = document.createElement("div");
+      pending.className = "media-pending";
+      pending.textContent = "⏳ baixando mídia (" + media.tipo + ")…";
+      return pending;
+    }
+
+    var container = document.createElement("div");
+    var el;
+    if (media.tipo === "image" || media.tipo === "sticker") {
+      el = document.createElement("img");
+      el.className = "media-img";
+      el.alt = media.tipo;
+    } else if (media.tipo === "audio") {
+      el = document.createElement("audio");
+      el.controls = true;
+    } else if (media.tipo === "video") {
+      el = document.createElement("video");
+      el.controls = true;
+    } else {
+      el = document.createElement("a");
+      el.className = "media-file";
+      el.textContent = "📎 baixar arquivo (" + (media.mime_type || media.tipo) + ")";
+      el.target = "_blank";
+    }
+    container.appendChild(el);
+    loadMediaBlob(media.id).then(function (url) {
+      if (!url) return;
+      if (el.tagName === "A") el.href = url; else el.src = url;
+    });
+    return container;
+  }
+
+  function loadMediaBlob(mediaId) {
+    if (state.mediaUrls[mediaId]) return Promise.resolve(state.mediaUrls[mediaId]);
+    return apiFetch("/admin/midia/" + mediaId)
+      .then(function (r) { return r.blob(); })
+      .then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        state.mediaUrls[mediaId] = url;
+        return url;
+      })
+      .catch(function () { return null; });
+  }
+
+  // -- compose / send --------------------------------------------------------
+
+  function autoGrow() {
+    var t = $("compose-text");
+    t.style.height = "auto";
+    t.style.height = Math.min(t.scrollHeight, 120) + "px";
+  }
+  $("compose-text").addEventListener("input", autoGrow);
+  $("compose-text").addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+  $("send-btn").addEventListener("click", sendMessage);
+  $("refresh-btn").addEventListener("click", function () {
+    loadConversas();
+    loadMensagens(false);
+  });
+
+  function sendMessage() {
+    var textarea = $("compose-text");
+    var text = textarea.value.trim();
+    if (!text || state.selectedId == null) return;
+    textarea.disabled = true;
+    $("send-btn").disabled = true;
+    apiFetch("/admin/conversas/" + state.selectedId + "/mensagens", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text }),
+    })
+      .then(function (r) {
+        if (r.status === 409) {
+          showToast("Contato não está em atendimento humano — não é possível enviar.", true);
+          return;
+        }
+        if (!r.ok) {
+          showToast("Falha ao enviar (HTTP " + r.status + ").", true);
+          return;
+        }
+        textarea.value = "";
+        autoGrow();
+        return loadMensagens(true).then(function () { return loadConversas(); });
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") showToast("Falha ao enviar mensagem.", true);
+      })
+      .finally(function () {
+        renderComposeState();
+      });
+  }
+
+  // -- polling ---------------------------------------------------------------
+
+  var listTimer = null, msgTimer = null;
+  function startPolling() {
+    stopPolling();
+    listTimer = setInterval(loadConversas, POLL_LIST_MS);
+    msgTimer = setInterval(function () {
+      if (state.selectedId != null) loadMensagens(false);
+    }, POLL_MSG_MS);
+  }
+  function stopPolling() {
+    clearInterval(listTimer);
+    clearInterval(msgTimer);
+  }
+
+  // -- boot --------------------------------------------------------------
+
+  function init() {
+    hideGate();
+    loadConversas();
+    startPolling();
+  }
+
+  if (state.token) {
+    init();
+  } else {
+    showGate("");
+  }
+})();
+</script>
+</body>
+</html>
