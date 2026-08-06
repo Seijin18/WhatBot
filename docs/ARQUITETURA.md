@@ -1,9 +1,9 @@
 # Arquitetura do WhatBot
 
-> Documento vivo — descreve o sistema como ele é hoje (commit `4f33617`,
-> 2026-08-05). Para o histórico de decisões e requisitos formais por
-> capability, ver `openspec/specs/`; para o plano de cada mudança em
-> andamento, `openspec/changes/`.
+> Documento vivo — descreve o sistema como ele é hoje (commit `b299c8c`,
+> 2026-08-05, após `conversation-history-media-storage`). Para o histórico
+> de decisões e requisitos formais por capability, ver `openspec/specs/`;
+> para o plano de cada mudança em andamento, `openspec/changes/`.
 
 ## 1. O que o sistema faz
 
@@ -67,8 +67,12 @@ flowchart LR
 
     DB[(PostgreSQL<br/>whatbot)]
     Admin[Secretaria<br/>WhatsApp admin]
+    Storage[(Storage de mídia<br/>local hoje, S3 depois)]
+    AdminAPI["/admin/* em whatbot-ingress<br/>histórico + envio humano"]
+    PainelExterno[camu-web-admin<br/>repositório externo]
 
     WA --> Evo --> WM
+    WA -. WhatsApp Cloud API .-> MetaGraph
     IG --> MetaGraph --> Ingress
     Ingress -. background task .-> Main
     WM --> Main
@@ -77,10 +81,16 @@ flowchart LR
     Main --> LLM
     Domain --> Know
     Main --> DB
+    Main --> Storage
     Channels --> Evo
     Channels --> MetaGraph
     Channels -->|notificações| Admin
     Admin -->|comandos NL| WM
+    Ingress --> AdminAPI
+    AdminAPI --> DB
+    AdminAPI --> Storage
+    AdminAPI --> Channels
+    PainelExterno -. bearer token .-> AdminAPI
 ```
 
 Regra de camada (imposta e testada, ver `openspec/specs/channels/spec.md`):
@@ -197,6 +207,57 @@ restante de resposta. A notificação é sempre entregue no canal de admin
 | `send_campaign_queue.py` | `whatbot.main.send_campaign_queue` | Drena `disparo_mensagens` pendentes, respeitando lote/intervalo/retries |
 | `refresh_ig_token.py` | renovação de credencial Instagram | Renova o token antes de expirar, alerta se perto de expirar |
 
+### 4.6 Histórico de conversas, mídia e API administrativa (`conversation-history-media-storage`)
+
+Toda mensagem recebida via WhatsApp Cloud API passa a persistir mais do que
+texto:
+
+1. **Payload bruto.** `mensagens` ganhou `canal`, `message_id`, `payload`
+   (JSONB, o evento cru do webhook) e `media_id` — todos opcionais, para não
+   quebrar os call sites que não têm payload de canal (comandos internos de
+   admin, por exemplo). Reentrega do mesmo `(canal, message_id)` é
+   descartada por um índice único parcial, não duplica linha.
+2. **Mídia (áudio, imagem, vídeo, documento, sticker).** Antes,
+   `whatbot/whatsapp_cloud_webhook.py` classificava esse evento como
+   `KIND_MEDIA_ONLY` e descartava tudo (`data=None`). Agora ele extrai a
+   referência de mídia (`MediaRef`: tipo, id da Meta, mime type, legenda) e
+   `whatbot/main.py::_handle_media_message`:
+   - baixa o binário via `WhatsAppCloudClient.download_media` (dois passos
+     da Graph API: metadados com URL assinada → binário);
+   - grava o arquivo através de `whatbot/storage/` (`StorageBackend`
+     Protocol; `LocalDiskStorage` é a única implementação hoje, endereçada
+     por chave relativa como `whatsapp/2026/08/{contact_id}/{uuid}.ogg` —
+     trocar para um backend em nuvem depois é reprocessar as mesmas chaves,
+     não redesenhar o schema; configurável por `MEDIA_STORAGE_BACKEND`/
+     `MEDIA_STORAGE_ROOT`);
+   - registra a referência em `media_arquivos` (`status`: `baixado` |
+     `pendente` | `falhou`) e a mensagem em `mensagens` (`media_id`), mesmo
+     quando o download falha — a falha nunca derruba o processamento nem
+     perde o registro de que o cliente mandou algo, só marca `status =
+     'falhou'`/`erro` para reprocessamento manual depois.
+   - Mensagem de mídia sem texto não passa pelo pipeline de LLM/intenção
+     (nada a interpretar hoje) — só é persistida.
+3. **API administrativa de leitura/envio.** `whatbot/ingress.py` (o mesmo
+   serviço FastAPI do webhook do Instagram/WhatsApp Cloud) ganhou rotas
+   `/admin/*`, autenticadas por bearer token estático (`ADMIN_API_TOKEN`,
+   fail-closed se não configurado):
+   - `GET /admin/conversas` — contatos com última mensagem/preview;
+   - `GET /admin/conversas/{contact_id}/mensagens?before=&limit=` —
+     histórico paginado por cursor (`Database.get_conversation`);
+   - `GET /admin/midia/{media_id}` — stream do binário via `StorageBackend`
+     (nunca um path de disco exposto);
+   - `POST /admin/conversas/{contact_id}/mensagens` — envio como atendente
+     humano, só aceito com o contato em handover (`ia_ativa = FALSE`),
+     sempre via `ChannelRouter.send_to_contact` — nunca um client de canal
+     concreto, mesma regra de layering do resto do projeto.
+
+   Essa API existe porque o painel administrativo da empresa (estoque,
+   vendas, precificação) vive num repositório externo,
+   `Projeto-Aba-Reta/camu-web-admin` (Next.js/Supabase), com um Postgres
+   **diferente** do WhatBot — a única forma de embutir uma tela de
+   conversas ali é consumindo essa API do lado do servidor, nunca por
+   leitura direta de tabela entre os dois bancos.
+
 ## 5. Módulos do pacote `whatbot/`
 
 | Módulo | Responsabilidade |
@@ -215,18 +276,23 @@ restante de resposta. A notificação é sempre entregue no canal de admin
 | `gemini_client.py` / `ollama_client.py` / `llm.py` | Clientes de LLM e fábrica (`create_llm_client`) que escolhe pelo `LLM_PROVIDER` |
 | `tools.py` | Function calling do Gemini (`listar_itens`, `buscar_horarios_turmas`, `buscar_precos`, `buscar_info_negocio`, `buscar_faq`) quando `GEMINI_USE_TOOLS=true` |
 | `webhook.py` | Parsers de payload da Evolution API (mensagens de entrada, mensagens de saída da secretaria, pedidos de catálogo) |
+| `whatsapp_cloud_webhook.py` | Parser de payloads da WhatsApp Cloud API (mensagem de texto, status, mídia — extrai `MediaRef` em vez de descartar) |
 | `instagram_webhook.py` | Parser de payloads do Instagram (mensagem, eco, story, mídia, apagada, múltiplos eventos) |
 | `instagram_credentials.py` | Leitura/renovação de credencial Instagram (`canal_credenciais`) |
 | `instagram_health.py` | Streak de falhas de envio e silêncio de webhook, alertas ao admin |
-| `ingress.py` | Serviço FastAPI dedicado de ingestão do webhook do Instagram |
+| `ingress.py` | Serviço FastAPI dedicado de ingestão dos webhooks Meta (Instagram e WhatsApp Cloud API) e das rotas `/admin/*` (histórico de conversas, mídia, envio humano) |
 | `contact_resolver.py` | Resolução de contato por nome/telefone para comandos de admin, com desambiguação |
 | `queue.py` | Notificações de fila (imediata, em lote, espera prolongada, resumo diário), auto-atendimento quando secretaria responde direto pelo WhatsApp |
 | `admin.py` / `admin_nlu.py` | Comandos administrativos em linguagem natural e modo de simulação (`#simular`) |
 | `message_log.py` | Log estruturado (JSONL) de entrada/saída/turnos de LLM, para auditoria e debug |
 | `channels/base.py` | Contrato `ChannelClient`, `InboundMessage`, `ChannelError`, janelas de mensageria |
 | `channels/router.py` | `ChannelRouter` — registro e resolução de cliente por canal, helpers `send_admin`/`send_to_contact` |
-| `channels/whatsapp_evolution.py` | Cliente HTTP da Evolution API (WhatsApp) |
+| `channels/whatsapp_evolution.py` | Cliente HTTP da Evolution API (WhatsApp), provider padrão (`WHATSAPP_PROVIDER=evolution`) |
+| `channels/whatsapp_cloud.py` | Cliente da WhatsApp Cloud API oficial da Meta (`WHATSAPP_PROVIDER=cloud`) — envio de texto e `download_media` (baixa binário de mídia recebida) |
 | `channels/instagram.py` | Cliente da Graph API do Instagram, aplica a janela de mensageria antes de enviar |
+| `storage/base.py` | `StorageBackend` (Protocol) — contrato de armazenamento de mídia por chave relativa |
+| `storage/local.py` | `LocalDiskStorage` — única implementação hoje, disco local, rejeita path traversal |
+| `storage/factory.py` | `get_storage_backend()` — lê `MEDIA_STORAGE_BACKEND`/`MEDIA_STORAGE_ROOT`; `s3` reservado, ainda não implementado |
 
 `scripts/` contém utilitários operacionais fora do fluxo de produção:
 pareamento de WhatsApp (`pair_whatsapp.py`, `get_qrcode.py`), setup de
@@ -325,7 +391,8 @@ Schema criado/migrado idempotentemente por `Database.ensure_schema()`
 | Tabela | Propósito |
 |---|---|
 | `contatos` | Um registro por cliente (ou admin). Chave `(canal, external_id)`. Campos: `status`, `tipo_cliente`, `ia_ativa`, `session_state` (JSONB), `push_name`, `handle`, `prioridade`, `handover_at`/`handover_motivo`/`atendido_at`/`assumido_por`, `bot_resume_at`, `last_inbound_at` |
-| `mensagens` | Histórico de mensagens por contato (`direction` in/out) |
+| `mensagens` | Histórico de mensagens por contato (`direction` in/out). Também: `canal`, `message_id` (índice único parcial por canal, evita duplicar reentrega), `payload` (JSONB, evento bruto do webhook), `media_id` — todos opcionais |
+| `media_arquivos` | Mídia recebida (áudio/imagem/vídeo/documento/sticker): `tipo`, `mime_type`, `tamanho_bytes`, `storage_backend`, `storage_key` (chave relativa, nunca path absoluto), `origem_media_id` (id da Meta), `status` (`baixado`\|`pendente`\|`falhou`), `erro` |
 | `notificacao_admin` | Estado singleton do lote de notificações pendentes |
 | `admin_sessao` | Sessão ativa de desambiguação/simulação por admin (`acao`, `candidatos` JSONB) |
 | `handover_historico` | Registro de cada handover concluído (espera, prioridade, motivo, quem assumiu) |
@@ -342,6 +409,15 @@ Ver `.env.example` para a lista completa e comentada. Grupos principais:
 
 - **Banco/Evolution**: `DB_DSN`, `EVOLUTION_API_BASE_URL`, `EVOLUTION_API_KEY`,
   `EVOLUTION_API_INSTANCE_NAME`.
+- **WhatsApp Cloud API** (`WHATSAPP_PROVIDER=cloud`): `WHATSAPP_PROVIDER`
+  (`evolution`|`cloud`, default `evolution`), `WA_CLOUD_APP_SECRET`,
+  `WA_CLOUD_WEBHOOK_VERIFY_TOKEN` (handshake/assinatura do webhook Meta,
+  mesmo protocolo do Instagram); credencial (`access_token`,
+  `phone_number_id`) vem de `canal_credenciais`, não de env var.
+- **Histórico de conversas e mídia**: `MEDIA_STORAGE_BACKEND` (`local`,
+  único implementado hoje), `MEDIA_STORAGE_ROOT` (default `./data/media`),
+  `ADMIN_API_TOKEN` (bearer token das rotas `/admin/*` — sem ele, tudo é
+  recusado com 401, fail-closed).
 - **LLM**: `LLM_PROVIDER` (`gemini`|`ollama`), `GEMINI_API_KEY`,
   `GEMINI_MODEL`, `GEMINI_MODEL_FALLBACKS`, `GEMINI_TEMPERATURE`,
   `GEMINI_USE_TOOLS`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`.
@@ -367,14 +443,25 @@ silenciosamente em produção.
 
 | Endpoint | Serviço | Método | Propósito |
 |---|---|---|---|
-| `f/whatbot/handler` (Windmill) | `windmill-server` | Webhook (POST via Evolution) | Entrada de mensagens WhatsApp |
+| `f/whatbot/handler` (Windmill) | `windmill-server` | Webhook (POST via Evolution) | Entrada de mensagens WhatsApp (`WHATSAPP_PROVIDER=evolution`, padrão) |
 | `/webhook/instagram` | `whatbot-ingress` (porta `IG_INGRESS_PORT`, padrão 8090) | `GET` | Handshake de verificação da Meta |
 | `/webhook/instagram` | `whatbot-ingress` | `POST` | Recebe eventos do Instagram (assinatura HMAC obrigatória) |
+| `/webhook/whatsapp` | `whatbot-ingress` | `GET` | Handshake de verificação da Meta (WhatsApp Cloud API, `WHATSAPP_PROVIDER=cloud`) |
+| `/webhook/whatsapp` | `whatbot-ingress` | `POST` | Recebe eventos da WhatsApp Cloud API — mensagem de texto e mídia (assinatura HMAC obrigatória) |
+| `/admin/conversas` | `whatbot-ingress` | `GET` | Lista contatos com última mensagem/preview (bearer token) |
+| `/admin/conversas/{contact_id}/mensagens` | `whatbot-ingress` | `GET` | Histórico paginado por cursor, com `payload` e mídia (bearer token) |
+| `/admin/midia/{media_id}` | `whatbot-ingress` | `GET` | Stream do binário de uma mídia salva (bearer token) |
+| `/admin/conversas/{contact_id}/mensagens` | `whatbot-ingress` | `POST` | Envio como atendente humano — só com o contato em handover (bearer token) |
 | `/health` | `whatbot-ingress` | `GET` | Health check do serviço de ingestão |
 
 APIs externas consumidas: Evolution API (`http://evolution-api:8080` dentro
-do compose), Meta Graph API (Instagram), Google Gemini API, Ollama local
-(opcional).
+do compose), Meta Graph API (Instagram e WhatsApp Cloud API, incluindo
+download de mídia), Google Gemini API, Ollama local (opcional).
+
+Consumidor externo da API `/admin/*`: painel administrativo da empresa
+(`Projeto-Aba-Reta/camu-web-admin`, repositório separado, Next.js/Supabase)
+— não vive neste repositório, chama a API do lado do servidor com o
+`ADMIN_API_TOKEN`.
 
 ## 13. Infraestrutura (docker-compose)
 
