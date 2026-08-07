@@ -373,6 +373,27 @@ class FakeDatabase:
         if push_name:
             row["push_name"] = push_name
 
+    def assumir_atendimento_direto(
+        self,
+        contact_id: int,
+        *,
+        motivo: str = "assumido_via_painel",
+        assumido_por: str | None = None,
+        prioridade: int = 0,
+    ) -> None:
+        row = self.contacts[contact_id]
+        row.update(
+            {
+                "ia_ativa": False,
+                "handover_at": _now(),
+                "atendido_at": None,
+                "handover_motivo": motivo,
+                "long_wait_notified": False,
+                "prioridade": prioridade,
+                "assumido_por": assumido_por,
+            }
+        )
+
     def is_waiting(self, phone: str, canal: str | None = None) -> bool:
         row = self._find_by_identity(phone, canal)
         return bool(row and self._is_waiting_row(row))

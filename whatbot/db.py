@@ -670,6 +670,48 @@ class Database:
                     (motivo, prioridade, push_name, contact_id),
                 )
 
+    def assumir_atendimento_direto(
+        self,
+        contact_id: int,
+        *,
+        motivo: str = "assumido_via_painel",
+        assumido_por: str | None = None,
+        prioridade: int = 0,
+    ) -> None:
+        """Força o contato para atendimento humano imediatamente, sem
+        esperar o bot detectar um pedido de handover
+        (`direct-human-takeover`, Requirement "Assumir atendimento direto
+        pela API administrativa").
+
+        Mesma transição de `enroll_handover` (`ia_ativa = FALSE`,
+        `handover_at = now()`, `atendido_at = NULL`, `handover_motivo`,
+        `prioridade`), mas grava `assumido_por` na mesma escrita — pula o
+        estado intermediário "na fila, aguardando alguém assumir" que o
+        fluxo normal passa por (`Database.assumir_contato`), porque quem
+        está chamando aqui já é quem vai atender.
+        """
+        self.init_pool()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE contatos
+                        SET ia_ativa = FALSE,
+                            handover_at = now(),
+                            atendido_at = NULL,
+                            handover_motivo = %s,
+                            long_wait_notified = FALSE,
+                            prioridade = %s,
+                            assumido_por = %s
+                        WHERE id = %s
+                        """,
+                        (motivo, prioridade, assumido_por, contact_id),
+                    )
+        except Exception as e:
+            self._logger.exception("Erro assumindo atendimento direto: %s", e)
+            raise
+
     def is_waiting(self, phone: str, canal: str | None = None) -> bool:
         contact = self.get_contact_by_phone(phone, canal=canal)
         return (

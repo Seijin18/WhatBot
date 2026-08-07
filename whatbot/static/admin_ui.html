@@ -40,7 +40,26 @@
     background: var(--bg);
     color: var(--text);
   }
-  #app { display: flex; height: 100vh; }
+  #shell { display: flex; flex-direction: column; height: 100vh; }
+  #app { display: flex; flex: 1; min-height: 0; }
+
+  /* -- Tunnel status bar --------------------------------------------------- */
+  #tunnel-bar {
+    display: flex; align-items: center; gap: 10px; padding: 6px 16px;
+    background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12.5px;
+    color: var(--muted); flex-wrap: wrap;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .dot-unknown { background: var(--muted); }
+  .dot-up { background: var(--accent); }
+  .dot-down { background: var(--danger); }
+  #tunnel-url-text { font-size: 11.5px; color: var(--muted); }
+  .link-btn {
+    background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12px;
+    padding: 0; text-decoration: underline;
+  }
+  .btn.small { padding: 4px 10px; font-size: 12px; }
+  #takeover-btn { background: var(--danger); }
 
   /* -- Gate (token) ----------------------------------------------------- */
   #gate {
@@ -163,31 +182,43 @@
   </div>
 </div>
 
-<div id="app" style="display:none">
-  <div id="sidebar">
-    <header>
-      <h1>Conversas</h1>
-      <button id="logout-btn" title="Trocar token">sair</button>
-    </header>
-    <div id="conv-list"></div>
+<div id="shell" style="display:none">
+  <div id="tunnel-bar">
+    <span id="tunnel-dot" class="dot dot-unknown"></span>
+    <span id="tunnel-text">verificando túnel…</span>
+    <code id="tunnel-url-text" style="display:none"></code>
+    <button class="link-btn" id="tunnel-copy-btn" style="display:none">copiar URL do webhook</button>
+    <button class="btn small" id="tunnel-start-btn" style="display:none">Iniciar túnel</button>
   </div>
-  <div id="main">
-    <div id="placeholder">Selecione uma conversa à esquerda</div>
-    <div id="conv-view" style="display:none; flex:1; flex-direction:column; min-height:0;">
-      <div id="conv-header">
-        <div>
-          <div class="who" id="conv-who">—</div>
-          <div class="meta" id="conv-meta">—</div>
+  <div id="app">
+    <div id="sidebar">
+      <header>
+        <h1>Conversas</h1>
+        <button id="logout-btn" title="Trocar token">sair</button>
+      </header>
+      <div id="conv-list"></div>
+    </div>
+    <div id="main">
+      <div id="placeholder">Selecione uma conversa à esquerda</div>
+      <div id="conv-view" style="display:none; flex:1; flex-direction:column; min-height:0;">
+        <div id="conv-header">
+          <div>
+            <div class="who" id="conv-who">—</div>
+            <div class="meta" id="conv-meta">—</div>
+          </div>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <button class="btn" id="takeover-btn" style="display:none;">🖐️ Assumir atendimento</button>
+            <button class="btn" id="refresh-btn" style="background:transparent;color:var(--muted);border:1px solid var(--border);font-weight:400;">atualizar</button>
+          </div>
         </div>
-        <button class="btn" id="refresh-btn" style="background:transparent;color:var(--muted);border:1px solid var(--border);font-weight:400;">atualizar</button>
-      </div>
-      <div id="messages"></div>
-      <div id="compose">
-        <div class="row">
-          <textarea id="compose-text" rows="1" placeholder="Escreva uma mensagem…"></textarea>
-          <button class="btn" id="send-btn">Enviar</button>
+        <div id="messages"></div>
+        <div id="compose">
+          <div class="row">
+            <textarea id="compose-text" rows="1" placeholder="Escreva uma mensagem…"></textarea>
+            <button class="btn" id="send-btn">Enviar</button>
+          </div>
+          <div class="hint" id="compose-hint"></div>
         </div>
-        <div class="hint" id="compose-hint"></div>
       </div>
     </div>
   </div>
@@ -202,6 +233,7 @@
   var TOKEN_KEY = "whatbot_admin_token";
   var POLL_LIST_MS = 8000;
   var POLL_MSG_MS = 4000;
+  var POLL_TUNNEL_MS = 15000;
   var MSG_LIMIT = 200;
 
   var state = {
@@ -258,14 +290,14 @@
 
   function showGate(err) {
     $("gate").style.display = "flex";
-    $("app").style.display = "none";
+    $("shell").style.display = "none";
     $("gate-err").textContent = err || "";
     stopPolling();
   }
 
   function hideGate() {
     $("gate").style.display = "none";
-    $("app").style.display = "flex";
+    $("shell").style.display = "flex";
   }
 
   $("gate-submit").addEventListener("click", function () {
@@ -363,19 +395,48 @@
     var hint = $("compose-hint");
     var textarea = $("compose-text");
     var sendBtn = $("send-btn");
+    var takeoverBtn = $("takeover-btn");
     if (conv && conv.ia_ativa) {
       hint.innerHTML =
-        '<span class="blocked">🤖 O bot está ativo nesta conversa — envie "assumir ' +
+        '<span class="blocked">🤖 O bot está ativo nesta conversa — clique em ' +
+        '"Assumir atendimento" acima, ou envie "assumir ' +
         escapeHtml(conv.external_id || "") +
-        '" pelo WhatsApp do admin para assumir o atendimento antes de responder por aqui.</span>';
+        '" pelo WhatsApp do admin, antes de responder por aqui.</span>';
       textarea.disabled = true;
       sendBtn.disabled = true;
+      takeoverBtn.style.display = "inline-block";
     } else {
-      hint.textContent = "Enviando como atendente humano.";
+      hint.textContent = conv ? "Enviando como atendente humano." : "";
       textarea.disabled = false;
       sendBtn.disabled = false;
+      takeoverBtn.style.display = "none";
     }
   }
+
+  function takeoverConversation() {
+    var conv = currentConv();
+    if (!conv) return;
+    var confirmed = window.confirm(
+      "Assumir o atendimento de \"" + (conv.label || conv.external_id) +
+      "\" agora? O bot para de responder automaticamente para este contato."
+    );
+    if (!confirmed) return;
+
+    var btn = $("takeover-btn");
+    btn.disabled = true;
+    apiFetch("/admin/conversas/" + conv.contact_id + "/assumir", { method: "POST" })
+      .then(function (r) { return r.json(); })
+      .then(function () {
+        return loadConversas().then(function () { return loadMensagens(false); });
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") showToast("Falha ao assumir atendimento.", true);
+      })
+      .finally(function () {
+        btn.disabled = false;
+      });
+  }
+  $("takeover-btn").addEventListener("click", takeoverConversation);
 
   function renderMessages(scrollToBottom) {
     var wrap = $("messages");
@@ -539,19 +600,81 @@
       });
   }
 
+  // -- túnel (status + iniciar) ----------------------------------------------
+
+  function renderTunnelStatus(data) {
+    var dot = $("tunnel-dot");
+    var text = $("tunnel-text");
+    var urlText = $("tunnel-url-text");
+    var copyBtn = $("tunnel-copy-btn");
+    var startBtn = $("tunnel-start-btn");
+
+    if (data.reachable) {
+      dot.className = "dot dot-up";
+      text.textContent = "Túnel ativo";
+      urlText.style.display = "inline";
+      urlText.textContent = data.url;
+      copyBtn.style.display = "inline";
+      startBtn.style.display = "none";
+    } else {
+      dot.className = "dot dot-down";
+      text.textContent = data.url
+        ? "Túnel inativo (última URL não responde)"
+        : "Túnel inativo";
+      urlText.style.display = "none";
+      copyBtn.style.display = "none";
+      startBtn.style.display = "inline-block";
+      startBtn.textContent = "Iniciar túnel";
+      startBtn.disabled = false;
+    }
+  }
+
+  function loadTunnelStatus() {
+    return apiFetch("/admin/tunnel/status")
+      .then(function (r) { return r.json(); })
+      .then(renderTunnelStatus)
+      .catch(function () { /* silencioso — não é crítico para o resto da tela */ });
+  }
+
+  $("tunnel-copy-btn").addEventListener("click", function () {
+    var url = $("tunnel-url-text").textContent + "/webhook/whatsapp";
+    navigator.clipboard.writeText(url).then(function () {
+      showToast("URL do webhook copiada: " + url);
+    }, function () {
+      showToast(url);
+    });
+  });
+
+  $("tunnel-start-btn").addEventListener("click", function () {
+    var btn = $("tunnel-start-btn");
+    btn.disabled = true;
+    btn.textContent = "Iniciando… (~15s)";
+    apiFetch("/admin/tunnel/start", { method: "POST" })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        renderTunnelStatus(data);
+        if (data.detail) showToast(data.detail, !data.reachable);
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") showToast("Falha ao iniciar túnel.", true);
+      });
+  });
+
   // -- polling ---------------------------------------------------------------
 
-  var listTimer = null, msgTimer = null;
+  var listTimer = null, msgTimer = null, tunnelTimer = null;
   function startPolling() {
     stopPolling();
     listTimer = setInterval(loadConversas, POLL_LIST_MS);
     msgTimer = setInterval(function () {
       if (state.selectedId != null) loadMensagens(false);
     }, POLL_MSG_MS);
+    tunnelTimer = setInterval(loadTunnelStatus, POLL_TUNNEL_MS);
   }
   function stopPolling() {
     clearInterval(listTimer);
     clearInterval(msgTimer);
+    clearInterval(tunnelTimer);
   }
 
   // -- boot --------------------------------------------------------------
@@ -559,6 +682,7 @@
   function init() {
     hideGate();
     loadConversas();
+    loadTunnelStatus();
     startPolling();
   }
 

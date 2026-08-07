@@ -193,3 +193,40 @@ docker compose up
 pkill -9 -f "docker-compose up"
 docker compose down --remove-orphans
 ```
+
+## 🚇 Túnel público (webhook da WhatsApp Cloud API / Instagram)
+
+`start-tunnel.sh` / `stop-tunnel.sh` — mesmo padrão dos scripts acima,
+para subir um túnel `cloudflared` (quick tunnel gratuito) até o
+`whatbot-ingress` (porta `IG_INGRESS_PORT`, padrão 8090). Necessário
+porque a Meta só entrega webhooks numa URL pública, e esses túneis
+gratuitos trocam de URL a cada reinício — não é solução permanente, só o
+suficiente para desenvolvimento/homologação (ver
+`docs/INSTAGRAM_INTEGRATION_PLAN.md` para as alternativas com domínio
+fixo).
+
+```bash
+./start-tunnel.sh          # porta 8090 por padrão
+./start-tunnel.sh 8091     # ou outra porta
+
+# ✅ Túnel ativo!
+#    PID: 12345
+#    URL: https://exemplo-aleatorio.trycloudflare.com
+#
+# Cole isto no Callback URL do webhook do WhatsApp na Meta:
+#    https://exemplo-aleatorio.trycloudflare.com/webhook/whatsapp
+
+./stop-tunnel.sh
+```
+
+Toda vez que a URL mudar (reinício do túnel), é preciso colar a nova URL
+de novo no painel da Meta (App Dashboard → WhatsApp/Instagram →
+Configuração → Webhooks) — o *verify token* (`WA_CLOUD_WEBHOOK_VERIFY_TOKEN`/
+`IG_WEBHOOK_VERIFY_TOKEN`) não muda.
+
+O botão "Iniciar túnel" no visualizador temporário de conversas
+(`http://localhost:8090/admin/ui`) faz a mesma coisa por dentro do
+próprio container `whatbot-ingress` (`whatbot/tunnel_control.py`), sem
+precisar rodar esses scripts manualmente — os dois mecanismos
+compartilham o arquivo `.tunnel-url` na raiz do projeto como fonte única
+de "qual é a URL pública atual".

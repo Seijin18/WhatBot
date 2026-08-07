@@ -36,9 +36,12 @@ from typing import Any, Dict, List
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
+from . import tunnel_control
 from .channels import ChannelError, INSTAGRAM, WHATSAPP, send_to_contact
 from .config import (
+    DEFAULT_IG_INGRESS_PORT,
     ENV_IG_APP_SECRET,
+    ENV_IG_INGRESS_PORT,
     ENV_IG_WEBHOOK_VERIFY_TOKEN,
     ENV_WA_CLOUD_APP_SECRET,
     ENV_WA_CLOUD_WEBHOOK_VERIFY_TOKEN,
@@ -264,6 +267,30 @@ def _check_admin_auth(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="token inválido")
 
 
+def _ingress_port() -> int:
+    try:
+        return int(os.getenv(ENV_IG_INGRESS_PORT, str(DEFAULT_IG_INGRESS_PORT)))
+    except ValueError:
+        return DEFAULT_IG_INGRESS_PORT
+
+
+@app.get("/admin/tunnel/status")
+def tunnel_status(authorization: str | None = Header(None)) -> Dict[str, Any]:
+    """Status do túnel público usado para receber webhooks da Meta —
+    ferramenta operacional temporária (`whatbot/tunnel_control.py`), sem
+    Requirement OpenSpec associado."""
+    _check_admin_auth(authorization)
+    return tunnel_control.get_status()
+
+
+@app.post("/admin/tunnel/start")
+def tunnel_start(authorization: str | None = Header(None)) -> Dict[str, Any]:
+    """Inicia o túnel se estiver inativo (idempotente — ver
+    `tunnel_control.start_tunnel`)."""
+    _check_admin_auth(authorization)
+    return tunnel_control.start_tunnel(_ingress_port())
+
+
 _ADMIN_UI_PATH = Path(__file__).parent / "static" / "admin_ui.html"
 
 
@@ -400,6 +427,32 @@ async def enviar_mensagem_humana(
 
     db.save_message(contact.id, direction="out", text=text, canal=contact.canal)
     return {"ok": True, "result": result}
+
+
+@app.post("/admin/conversas/{contact_id}/assumir")
+def assumir_atendimento(
+    contact_id: int, authorization: str | None = Header(None)
+) -> Dict[str, Any]:
+    """Assume atendimento humano imediatamente, sem esperar o bot detectar
+    um pedido de handover (`direct-human-takeover`, Requirement "Assumir
+    atendimento direto pela API administrativa").
+
+    Idempotente: contato já em atendimento humano não é erro, só confirma
+    o estado atual — não reenrola nem sobrescreve `assumido_por` já
+    setado. Diferente do handover automático, não dispara a notificação de
+    fila (`process_new_handover`): quem chama esta rota já é quem está
+    assumindo, não há ninguém mais para avisar.
+    """
+    _check_admin_auth(authorization)
+    db, _router = get_infra()
+    contact = db.get_contact_by_id(contact_id)
+    if contact is None:
+        raise HTTPException(status_code=404, detail="contato não encontrado")
+    if not contact.ia_ativa:
+        return {"ok": True, "already_human": True}
+
+    db.assumir_atendimento_direto(contact_id, assumido_por="painel-admin")
+    return {"ok": True, "already_human": False}
 
 
 @app.get("/health")

@@ -1,9 +1,10 @@
 # Arquitetura do WhatBot
 
-> Documento vivo — descreve o sistema como ele é hoje (commit `b299c8c`,
-> 2026-08-05, após `conversation-history-media-storage`). Para o histórico
-> de decisões e requisitos formais por capability, ver `openspec/specs/`;
-> para o plano de cada mudança em andamento, `openspec/changes/`.
+> Documento vivo — descreve o sistema como ele é hoje (2026-08-06, após
+> `direct-human-takeover` e as ferramentas operacionais de túnel/visualizador
+> temporário). Para o histórico de decisões e requisitos formais por
+> capability, ver `openspec/specs/`; para o plano de cada mudança em
+> andamento, `openspec/changes/`.
 
 ## 1. O que o sistema faz
 
@@ -293,6 +294,8 @@ texto:
 | `storage/base.py` | `StorageBackend` (Protocol) — contrato de armazenamento de mídia por chave relativa |
 | `storage/local.py` | `LocalDiskStorage` — única implementação hoje, disco local, rejeita path traversal |
 | `storage/factory.py` | `get_storage_backend()` — lê `MEDIA_STORAGE_BACKEND`/`MEDIA_STORAGE_ROOT`; `s3` reservado, ainda não implementado |
+| `tunnel_control.py` | Sobe/verifica um cloudflared quick tunnel de dentro do próprio container `whatbot-ingress` (botão "Iniciar túnel" do visualizador temporário) — ferramenta operacional, não uma capability de produto |
+| `static/admin_ui.html` | Visualizador temporário de conversas (servido em `GET /admin/ui`) — histórico, envio humano, status do túnel; substituído pelo painel `camu-web-admin` quando ele existir |
 
 `scripts/` contém utilitários operacionais fora do fluxo de produção:
 pareamento de WhatsApp (`pair_whatsapp.py`, `get_qrcode.py`), setup de
@@ -452,6 +455,10 @@ silenciosamente em produção.
 | `/admin/conversas/{contact_id}/mensagens` | `whatbot-ingress` | `GET` | Histórico paginado por cursor, com `payload` e mídia (bearer token) |
 | `/admin/midia/{media_id}` | `whatbot-ingress` | `GET` | Stream do binário de uma mídia salva (bearer token) |
 | `/admin/conversas/{contact_id}/mensagens` | `whatbot-ingress` | `POST` | Envio como atendente humano — só com o contato em handover (bearer token) |
+| `/admin/conversas/{contact_id}/assumir` | `whatbot-ingress` | `POST` | Assume atendimento humano imediatamente, sem esperar o bot pedir handover (idempotente; bearer token) |
+| `/admin/tunnel/status` | `whatbot-ingress` | `GET` | Status do túnel público (cloudflared) — última URL conhecida + alcançabilidade ao vivo (bearer token) |
+| `/admin/tunnel/start` | `whatbot-ingress` | `POST` | Sobe um cloudflared quick tunnel de dentro do container, se ainda não houver um ativo (idempotente; bearer token) |
+| `/admin/ui` | `whatbot-ingress` | `GET` | Visualizador temporário de conversas (HTML único, sem auth própria — pede o token e chama as rotas acima do lado do cliente) |
 | `/health` | `whatbot-ingress` | `GET` | Health check do serviço de ingestão |
 
 APIs externas consumidas: Evolution API (`http://evolution-api:8080` dentro

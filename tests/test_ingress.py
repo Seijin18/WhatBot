@@ -611,6 +611,40 @@ class TestAdminConversationRoutes(IngressTestCase):
         self.assertEqual(ids_first & ids_second, set())
 
 
+class TestAdminTunnelRoutes(IngressTestCase):
+    """`/admin/tunnel/*` — ferramenta operacional temporária, delega tudo a
+    `whatbot.tunnel_control` (testado isoladamente em
+    `tests/test_tunnel_control.py`); aqui só checa auth + repasse."""
+
+    def _auth(self):
+        return {"Authorization": "Bearer test-admin-token"}
+
+    def test_status_requires_auth(self):
+        response = self.client.get("/admin/tunnel/status")
+        self.assertEqual(response.status_code, 401)
+
+    def test_status_delegates_to_tunnel_control(self):
+        fake_status = {"url": "https://x.trycloudflare.com", "reachable": True}
+        with patch("whatbot.ingress.tunnel_control.get_status", return_value=fake_status):
+            response = self.client.get("/admin/tunnel/status", headers=self._auth())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), fake_status)
+
+    def test_start_requires_auth(self):
+        response = self.client.post("/admin/tunnel/start")
+        self.assertEqual(response.status_code, 401)
+
+    def test_start_delegates_to_tunnel_control_with_configured_port(self):
+        fake_result = {"url": "https://y.trycloudflare.com", "reachable": True, "started": True, "detail": None}
+        with patch(
+            "whatbot.ingress.tunnel_control.start_tunnel", return_value=fake_result
+        ) as start_mock:
+            response = self.client.post("/admin/tunnel/start", headers=self._auth())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), fake_result)
+        start_mock.assert_called_once()
+
+
 class TestAdminUIRoute(IngressTestCase):
     """`GET /admin/ui` (visualizador temporário, `whatbot/static/admin_ui.html`).
 
@@ -624,6 +658,9 @@ class TestAdminUIRoute(IngressTestCase):
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn("ADMIN_API_TOKEN", response.text)
         self.assertIn("/admin/conversas", response.text)
+        self.assertIn("/admin/tunnel/status", response.text)
+        self.assertIn("/admin/tunnel/start", response.text)
+        self.assertIn("assumir", response.text)
 
 
 class TestAdminMediaRoute(IngressTestCase):
@@ -724,6 +761,49 @@ class TestAdminSendMessageRoute(IngressTestCase):
             headers=self._auth(),
         )
         self.assertEqual(response.status_code, 400)
+
+
+class TestAdminTakeoverRoute(IngressTestCase):
+    """Requirement "Assumir atendimento direto pela API administrativa"
+    (`direct-human-takeover`)."""
+
+    def _auth(self):
+        return {"Authorization": "Bearer test-admin-token"}
+
+    def test_takeover_deactivates_bot_and_sets_assumido_por(self):
+        contact = self.db.create_contact(
+            phone="5511999999999", canal=WHATSAPP, ia_ativa=True
+        )
+        response = self.client.post(
+            f"/admin/conversas/{contact.id}/assumir", headers=self._auth()
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"ok": True, "already_human": False})
+
+        updated = self.db.get_contact_by_id(contact.id)
+        self.assertFalse(updated.ia_ativa)
+        self.assertIsNotNone(updated.handover_at)
+
+    def test_takeover_on_contact_already_in_human_mode_is_idempotent(self):
+        contact = self.db.create_contact(
+            phone="5511999999999", canal=WHATSAPP, ia_ativa=False
+        )
+        response = self.client.post(
+            f"/admin/conversas/{contact.id}/assumir", headers=self._auth()
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"ok": True, "already_human": True})
+
+    def test_unknown_contact_is_404(self):
+        response = self.client.post(
+            "/admin/conversas/999999/assumir", headers=self._auth()
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_requires_auth(self):
+        contact = self.db.create_contact(phone="5511999999999", canal=WHATSAPP)
+        response = self.client.post(f"/admin/conversas/{contact.id}/assumir")
+        self.assertEqual(response.status_code, 401)
 
 
 if __name__ == "__main__":

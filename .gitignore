@@ -30,6 +30,16 @@ logs/
 whatbot.log
 .whatbot-pid
 
+# Túnel cloudflared temporário (start-tunnel.sh / whatbot/tunnel_control.py)
+tunnel.log
+tunnel-ui.log
+.tunnel-pid
+.tunnel-url
+
+# Binário staged localmente para o build da imagem Docker (ver Dockerfile) —
+# grande demais e específico da arquitetura da máquina para ir ao Git.
+docker/vendor/
+
 # conversation-history-media-storage: mídia baixada via LocalDiskStorage
 # (MEDIA_STORAGE_ROOT, default ./data/media) — dados de runtime, não versionado.
 /data/
