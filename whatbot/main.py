@@ -283,18 +283,45 @@ def run_admin_simulation(
         sim_phone = normalize_phone(resolve_simulate_phone(sim_phone))
     else:
         sim_phone = sim_phone or resolve_simulate_phone(None)
+
+    # self-simulation-real-flow: quando o número simulado é o PRÓPRIO
+    # número do admin, não há risco de corromper o histórico de um
+    # cliente real — é literalmente a conversa real desse contato. Único
+    # jeito de testar o visualizador de conversas/"assumir atendimento"
+    # de ponta a ponta enquanto o app da Meta está em modo de teste (só
+    # aceita o número já cadastrado do admin). Simular como qualquer
+    # outro número continua inteiramente sandboxed, sem mudança nenhuma.
+    is_self_simulation = canal == WHATSAPP and sim_phone == admin_phone
     logger.info(
-        "Simulação cliente %s (%s) por admin %s", sim_phone, canal, admin_phone
+        "Simulação cliente %s (%s) por admin %s%s",
+        sim_phone,
+        canal,
+        admin_phone,
+        " (mesmo número do admin — fluxo real)" if is_self_simulation else "",
     )
     result = process_customer_message(
         sim_phone,
         sim_text,
-        push_name=f"Simulado por {push_name or admin_phone}",
-        simulated=True,
+        push_name=push_name if is_self_simulation else f"Simulado por {push_name or admin_phone}",
+        simulated=not is_self_simulation,
         canal=canal,
-        history_override=history_override,
-        session_override=session_override,
+        # O shadow history/session_state da sessão de simulação persistente
+        # (`_continue_admin_simulation`) não faz sentido aqui — o contato
+        # real já tem seu próprio histórico/estado persistido, é isso que
+        # deve ser usado (comportamento padrão de `process_customer_message`
+        # quando os overrides são `None`).
+        history_override=None if is_self_simulation else history_override,
+        session_override=None if is_self_simulation else session_override,
     )
+    if is_self_simulation:
+        # Já foi processado e respondido de verdade acima — decorar e
+        # reenviar por `send_admin_text` duplicaria a mensagem no mesmo
+        # número.
+        result["simulated_by"] = admin_phone
+        result["simulated_as"] = sim_phone
+        result["self_simulation"] = True
+        return result
+
     # `customer_reply_text` is the normalized field every reply-producing
     # branch of `process_customer_message`/`executar_handover_para_secretaria`
     # fills in with exactly what a real customer would have seen this turn —

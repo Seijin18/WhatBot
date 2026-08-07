@@ -67,14 +67,25 @@ def _write_url(url: str) -> None:
     URL_FILE.write_text(url + "\n", encoding="utf-8")
 
 
-def check_reachable(url: str, timeout: float = 4.0) -> bool:
+def check_reachable(url: str, timeout: float = 8.0, attempts: int = 2) -> bool:
     """`True` se `{url}/health` responder OK — prova ponta a ponta que o
-    túnel está de pé, não só que um processo local existe."""
-    try:
-        response = requests.get(f"{url}/health", timeout=timeout)
-        return response.ok
-    except requests.RequestException:
-        return False
+    túnel está de pé, não só que um processo local existe.
+
+    Duas tentativas por padrão: a borda do quick tunnel gratuito às vezes
+    tem uma primeira resposta lenta/instável (visto na prática: o
+    indicador da UI piscando "inativo" com o túnel de pé) — uma falha
+    isolada não deve virar "inativo" na tela.
+    """
+    for attempt in range(attempts):
+        try:
+            response = requests.get(f"{url}/health", timeout=timeout)
+            if response.ok:
+                return True
+        except requests.RequestException:
+            pass
+        if attempt < attempts - 1:
+            time.sleep(0.5)
+    return False
 
 
 def get_status() -> Dict[str, Any]:

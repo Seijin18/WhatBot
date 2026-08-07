@@ -60,6 +60,7 @@
   }
   .btn.small { padding: 4px 10px; font-size: 12px; }
   #takeover-btn { background: var(--danger); }
+  #takeover-btn.armed { background: #f59e0b; color: #1c1e21; }
 
   /* -- Gate (token) ----------------------------------------------------- */
   #gate {
@@ -396,6 +397,7 @@
     var textarea = $("compose-text");
     var sendBtn = $("send-btn");
     var takeoverBtn = $("takeover-btn");
+    resetTakeoverButton(); // nunca deixa o botão "armado" ao trocar de conversa
     if (conv && conv.ia_ativa) {
       hint.innerHTML =
         '<span class="blocked">🤖 O bot está ativo nesta conversa — clique em ' +
@@ -413,20 +415,45 @@
     }
   }
 
+  // Confirmação de dois cliques em vez de `window.confirm()` — diálogos
+  // nativos do navegador são suprimidos/desabilitados em alguns ambientes
+  // (ex.: o Browser pane do Claude Code sempre responde `false`), o que
+  // faria o clique nunca chegar a chamar a API. Primeiro clique arma a
+  // confirmação (texto muda, alguns segundos para confirmar); segundo
+  // clique dentro da janela executa de verdade.
+  var takeoverArmedUntil = 0;
+  var TAKEOVER_CONFIRM_WINDOW_MS = 4000;
+
+  function resetTakeoverButton() {
+    var btn = $("takeover-btn");
+    takeoverArmedUntil = 0;
+    btn.textContent = "🖐️ Assumir atendimento";
+    btn.classList.remove("armed");
+  }
+
   function takeoverConversation() {
     var conv = currentConv();
     if (!conv) return;
-    var confirmed = window.confirm(
-      "Assumir o atendimento de \"" + (conv.label || conv.external_id) +
-      "\" agora? O bot para de responder automaticamente para este contato."
-    );
-    if (!confirmed) return;
-
     var btn = $("takeover-btn");
+
+    if (Date.now() > takeoverArmedUntil) {
+      // Primeiro clique: arma, não chama a API ainda.
+      takeoverArmedUntil = Date.now() + TAKEOVER_CONFIRM_WINDOW_MS;
+      btn.textContent = "Clique de novo para confirmar";
+      btn.classList.add("armed");
+      setTimeout(function () {
+        if (Date.now() >= takeoverArmedUntil) resetTakeoverButton();
+      }, TAKEOVER_CONFIRM_WINDOW_MS + 50);
+      return;
+    }
+
+    // Segundo clique dentro da janela: confirma de verdade.
+    resetTakeoverButton();
     btn.disabled = true;
     apiFetch("/admin/conversas/" + conv.contact_id + "/assumir", { method: "POST" })
       .then(function (r) { return r.json(); })
       .then(function () {
+        showToast("Atendimento assumido.");
         return loadConversas().then(function () { return loadMensagens(false); });
       })
       .catch(function (e) {

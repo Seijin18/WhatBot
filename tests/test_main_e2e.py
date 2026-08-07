@@ -586,6 +586,48 @@ class TestAdminSimulation(MainE2ETestCase):
         self.assertEqual(self.wa.sent[0]["source"], "simulation")
 
 
+class TestSelfSimulationUsesRealFlow(MainE2ETestCase):
+    """`self-simulation-real-flow`: quando `#simular` usa o PRÓPRIO número
+    do admin como `sim_phone`, o turno segue o fluxo real (persistido,
+    resposta enviada de verdade) — a única forma de testar o visualizador
+    de conversas/"assumir atendimento" de ponta a ponta enquanto o app da
+    Meta está em modo de teste (só aceita o número já cadastrado do
+    admin). Simular como qualquer outro número continua sandboxed."""
+
+    def test_self_simulation_persists_and_sends_for_real(self):
+        result = main_mod.run_admin_simulation(
+            ADMIN_PHONE, ADMIN_PHONE, "Quais modalidades vocês têm?"
+        )
+
+        self.assertTrue(result.get("self_simulation"))
+        self.assertFalse(result.get("simulated"))
+
+        contact = self.db.get_contact_by_phone(ADMIN_PHONE, canal=WHATSAPP)
+        self.assertIsNotNone(contact)
+        messages = self.db.get_recent_messages(contact.id)
+        self.assertEqual({m.direction for m in messages}, {"in", "out"})
+
+    def test_self_simulation_sends_once_without_the_decorated_duplicate(self):
+        main_mod.run_admin_simulation(ADMIN_PHONE, ADMIN_PHONE, "oi")
+
+        # Um único envio real ao próprio número — nunca a decoração extra
+        # "🧪 Teste como cliente" que duplicaria a mensagem no mesmo número.
+        self.assertEqual(len(self.wa.sent), 1)
+        self.assertNotIn("Teste como cliente", self.wa.sent[0]["text"])
+
+    def test_simulating_a_different_number_stays_sandboxed(self):
+        result = main_mod.run_admin_simulation(ADMIN_PHONE, CUSTOMER_PHONE, "oi")
+
+        self.assertFalse(result.get("self_simulation", False))
+        contact = self.db.get_contact_by_phone(CUSTOMER_PHONE, canal=WHATSAPP)
+        if contact is not None:
+            self.assertEqual(self.db.get_recent_messages(contact.id), [])
+        # A resposta só é decorada e mandada de volta ao admin, nunca ao
+        # número simulado (comportamento atual, sem regressão).
+        self.assertEqual(len(self.wa.sent), 1)
+        self.assertEqual(self.wa.sent[0]["to"], ADMIN_PHONE)
+
+
 class TestQueueMaintenance(MainE2ETestCase):
     def test_check_queue_runs_without_arguments(self):
         """Production calls `check_queue()` bare from a scheduled Windmill job."""
