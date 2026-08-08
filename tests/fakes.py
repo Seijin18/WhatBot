@@ -547,6 +547,14 @@ class FakeDatabase:
         row["ia_ativa"] = False
         return True
 
+    def delete_contact(self, phone: str, *, canal: str | None = None) -> bool:
+        """Mirrors `Database.delete_contact` (`admin-bulk-phone-toggle`)."""
+        row = self._find_by_identity(phone, canal)
+        if not row:
+            return False
+        del self.contacts[row["id"]]
+        return True
+
     def process_auto_reactivations(self) -> list[str]:
         """Mirrors `Database.process_auto_reactivations`: returns labels, not
         raw `phone` (which is `None` for non-WhatsApp contacts)."""

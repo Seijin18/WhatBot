@@ -92,6 +92,30 @@ class TestAdminNlu(unittest.TestCase):
         self.assertTrue(is_casual_test_message("olá!"))
         self.assertFalse(is_casual_test_message("quem ta na fila?"))
 
+    def test_ativar_bot_intent(self):
+        """`admin-bulk-phone-toggle`: "ativa(r) o bot" is a synonym of
+        "reativar", requiring "bot" alongside so it doesn't false-positive
+        on unrelated text."""
+        intent = parse_admin_intent("ativa o bot 5511999999999")
+        self.assertEqual(intent.action, "reactivate")
+        self.assertIn("5511999999999", intent.query)
+
+    def test_desativar_bot_does_not_trigger_reactivate(self):
+        """Regression: "desativar" must never be mis-parsed as "ativar" —
+        no word boundary immediately before "ativa" inside "desativar"."""
+        intent = parse_admin_intent("desativa o bot 5511999999999")
+        self.assertEqual(intent.action, "pause")
+
+    def test_rename_intent(self):
+        intent = parse_admin_intent("renomeia o Pedro para Pedro Silva")
+        self.assertEqual(intent.action, "rename")
+        self.assertIn("pedro", intent.query.lower())
+
+    def test_delete_contact_intent(self):
+        intent = parse_admin_intent("apaga o contato do 5511999999999")
+        self.assertEqual(intent.action, "delete_contact")
+        self.assertIn("5511999999999", intent.query)
+
     def test_resolve_simulate_phone_avoids_business_line(self):
         import os
 
@@ -779,6 +803,384 @@ class TestReactivateAccentFold(unittest.TestCase):
 
         self.assertIn("Bot reativado", result["reply"])
         self.assertTrue(db.contacts[contact.id]["ia_ativa"])
+
+
+class TestBulkPhoneToggleCommand(unittest.TestCase):
+    """`admin-bulk-phone-toggle`: ativar/desativar por telefone único ou
+    lista, com fallback idempotente."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"ADMIN_NOTIFY_PHONES": "5511900000001"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_single_phone_already_paused_is_idempotent(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro", ia_ativa=False)
+
+        result = handle_admin_message(
+            "5511900000001", "desativa o bot 5511888888888", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("já está com o bot pausado", result["reply"])
+        self.assertFalse(db.get_contact_by_phone("5511888888888").ia_ativa)
+
+    def test_single_phone_already_active_on_reactivate_is_idempotent(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro", ia_ativa=True)
+
+        result = handle_admin_message(
+            "5511900000001", "ativa o bot 5511888888888", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("já está ativo", result["reply"])
+        self.assertTrue(db.get_contact_by_phone("5511888888888").ia_ativa)
+
+    def test_list_with_mixed_states_for_pause(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro", ia_ativa=True)
+        db.create_contact(phone="5511777777777", push_name="Maria", ia_ativa=False)
+
+        result = handle_admin_message(
+            "5511900000001",
+            "desativa o bot 5511888888888, 5511777777777",
+            db,
+            router,
+            contact_id=1,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("5511888888888", result["reply"])
+        self.assertIn("5511777777777", result["reply"])
+        self.assertFalse(db.get_contact_by_phone("5511888888888").ia_ativa)
+        self.assertFalse(db.get_contact_by_phone("5511777777777").ia_ativa)
+
+    def test_list_with_mixed_states_for_reactivate(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro", ia_ativa=False)
+        db.create_contact(phone="5511777777777", push_name="Maria", ia_ativa=True)
+
+        result = handle_admin_message(
+            "5511900000001",
+            "ativa o bot 5511888888888, 5511777777777",
+            db,
+            router,
+            contact_id=1,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("5511888888888", result["reply"])
+        self.assertIn("5511777777777", result["reply"])
+        self.assertTrue(db.get_contact_by_phone("5511888888888").ia_ativa)
+        self.assertTrue(db.get_contact_by_phone("5511777777777").ia_ativa)
+
+    def test_list_with_missing_number_does_not_crash_and_does_not_offer_creation(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro", ia_ativa=True)
+
+        result = handle_admin_message(
+            "5511900000001",
+            "desativa o bot 5511888888888, 5511777777777",
+            db,
+            router,
+            contact_id=1,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("Não encontrado", result["reply"])
+        self.assertIn("5511777777777", result["reply"])
+        # Não dispara o fluxo de criação (só para telefone único).
+        self.assertIsNone(db.get_admin_sessao("5511900000001"))
+
+    def test_duplicate_number_in_list_is_deduplicated(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro", ia_ativa=True)
+
+        result = handle_admin_message(
+            "5511900000001",
+            "desativa o bot 5511888888888, 5511888888888",
+            db,
+            router,
+            contact_id=1,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reply"].count("5511888888888"), 1)
+
+    def test_non_numeric_segment_is_reported_as_unrecognized(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro", ia_ativa=True)
+
+        result = handle_admin_message(
+            "5511900000001",
+            "desativa o bot 5511888888888, xyz",
+            db,
+            router,
+            contact_id=1,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("Não reconhecido", result["reply"])
+
+
+class TestContactCreationFlow(unittest.TestCase):
+    """`admin-bulk-phone-toggle`, Parte B: telefone único não encontrado
+    oferece cadastro como novo contato."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"ADMIN_NOTIFY_PHONES": "5511900000001"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_unknown_single_phone_asks_for_a_name(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+
+        result = handle_admin_message(
+            "5511900000001", "ativa o bot 5511888888888", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("Não encontrei", result["reply"])
+        self.assertIsNone(db.get_contact_by_phone("5511888888888"))
+
+    def test_answering_with_a_name_creates_contact_in_the_requested_state(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+
+        handle_admin_message(
+            "5511900000001", "desativa o bot 5511888888888", db, router, contact_id=1
+        )
+        result = handle_admin_message(
+            "5511900000001", "Pedro Silva", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("Pedro Silva", result["reply"])
+        contact = db.get_contact_by_phone("5511888888888")
+        self.assertIsNotNone(contact)
+        self.assertEqual(contact.push_name, "Pedro Silva")
+        self.assertFalse(contact.ia_ativa)
+
+    def test_answering_nao_cancels_without_creating(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+
+        handle_admin_message(
+            "5511900000001", "ativa o bot 5511888888888", db, router, contact_id=1
+        )
+        result = handle_admin_message(
+            "5511900000001", "não", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIsNone(db.get_contact_by_phone("5511888888888"))
+
+
+class TestRenameCommand(unittest.TestCase):
+    """`admin-bulk-phone-toggle`, Parte C."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"ADMIN_NOTIFY_PHONES": "5511900000001"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_rename_by_name(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        contact = db.create_contact(phone="5511888888888", push_name="Pedro")
+
+        result = handle_admin_message(
+            "5511900000001",
+            "renomeia o Pedro para Pedro Silva",
+            db,
+            router,
+            contact_id=1,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("Pedro Silva", result["reply"])
+        self.assertEqual(
+            db.get_contact_by_phone("5511888888888").push_name, "Pedro Silva"
+        )
+
+    def test_rename_by_phone(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro")
+
+        result = handle_admin_message(
+            "5511900000001",
+            "renomeia 5511888888888 para Pedro Silva",
+            db,
+            router,
+            contact_id=1,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            db.get_contact_by_phone("5511888888888").push_name, "Pedro Silva"
+        )
+
+    def test_rename_with_disambiguation(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Maria Silva")
+        db.create_contact(phone="5511777777777", push_name="Maria Costa")
+
+        disambiguation = handle_admin_message(
+            "5511900000001",
+            "renomeia a Maria para Maria Nova",
+            db,
+            router,
+            contact_id=1,
+        )
+        self.assertTrue(disambiguation["ok"])
+        self.assertIn("Encontrei vários contatos", disambiguation["reply"])
+
+        picked = handle_admin_message("5511900000001", "1", db, router, contact_id=1)
+
+        self.assertTrue(picked["ok"])
+        self.assertIn("Maria Nova", picked["reply"])
+        # Most-recent-first: option "1" is Maria Costa (5511777777777).
+        self.assertEqual(
+            db.get_contact_by_phone("5511777777777").push_name, "Maria Nova"
+        )
+        self.assertEqual(
+            db.get_contact_by_phone("5511888888888").push_name, "Maria Silva"
+        )
+
+    def test_missing_para_returns_usage_without_mutating(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro")
+
+        result = handle_admin_message(
+            "5511900000001", "renomeia o Pedro", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("Envie assim", result["reply"])
+        self.assertEqual(
+            db.get_contact_by_phone("5511888888888").push_name, "Pedro"
+        )
+
+    def test_contact_not_found(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+
+        result = handle_admin_message(
+            "5511900000001",
+            "renomeia o Fulano para Novo Nome",
+            db,
+            router,
+            contact_id=1,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("Não encontrei", result["reply"])
+
+
+class TestDeleteContactCommand(unittest.TestCase):
+    """`admin-bulk-phone-toggle`, Parte D."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"ADMIN_NOTIFY_PHONES": "5511900000001"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_single_match_asks_for_confirmation_without_deleting(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro")
+
+        result = handle_admin_message(
+            "5511900000001",
+            "apaga o contato do Pedro",
+            db,
+            router,
+            contact_id=1,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("Tem certeza", result["reply"])
+        self.assertIsNotNone(db.get_contact_by_phone("5511888888888"))
+
+    def test_confirming_with_sim_deletes(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro")
+
+        handle_admin_message(
+            "5511900000001", "apaga o contato do Pedro", db, router, contact_id=1
+        )
+        result = handle_admin_message(
+            "5511900000001", "sim", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("apagado", result["reply"])
+        self.assertIsNone(db.get_contact_by_phone("5511888888888"))
+
+    def test_any_other_reply_cancels_without_deleting(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro")
+
+        handle_admin_message(
+            "5511900000001", "apaga o contato do Pedro", db, router, contact_id=1
+        )
+        result = handle_admin_message(
+            "5511900000001", "opa não", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIsNotNone(db.get_contact_by_phone("5511888888888"))
+
+    def test_disambiguation_then_confirmation_deletes_only_the_chosen_one(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Maria Silva")
+        db.create_contact(phone="5511777777777", push_name="Maria Costa")
+
+        disambiguation = handle_admin_message(
+            "5511900000001", "apaga o contato da Maria", db, router, contact_id=1
+        )
+        self.assertIn("Encontrei vários contatos", disambiguation["reply"])
+
+        confirmation_prompt = handle_admin_message(
+            "5511900000001", "1", db, router, contact_id=1
+        )
+        self.assertIn("Tem certeza", confirmation_prompt["reply"])
+
+        result = handle_admin_message(
+            "5511900000001", "sim", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        # Most-recent-first: option "1" is Maria Costa (5511777777777).
+        self.assertIsNone(db.get_contact_by_phone("5511777777777"))
+        self.assertIsNotNone(db.get_contact_by_phone("5511888888888"))
+
+    def test_contact_not_found(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+
+        result = handle_admin_message(
+            "5511900000001", "apaga o contato do Fulano", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIn("Não encontrei", result["reply"])
 
 
 if __name__ == "__main__":

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 from .admin_nlu import parse_admin_intent
 from .config import get_business_phone, resolve_simulate_phone
 from .contact_resolver import (
     extract_phone_from_text,
+    extract_phone_list_from_text,
     find_waiting_matches,
     format_disambiguation,
     pick_from_disambiguation,
@@ -38,6 +40,34 @@ class TargetIdentity:
     external_id: str
     canal: str
     label: str
+
+
+def _toggle_bot_for_phones(
+    phones: list[str], activate: bool, db: Database
+) -> tuple[list[str], list[str], list[str]]:
+    """Applies pause/reactivate to each phone, skipping the mutation when
+    the contact is already in the requested state (idempotent fallback,
+    `admin-bulk-phone-toggle`).
+
+    Returns `(mudou_agora, ja_estava, nao_encontrado)`, each a list of
+    phones, in `phones` order.
+    """
+    mudou_agora: list[str] = []
+    ja_estava: list[str] = []
+    nao_encontrado: list[str] = []
+    for phone in phones:
+        contact = db.get_contact_by_phone(phone, canal=WHATSAPP)
+        if contact is None:
+            nao_encontrado.append(phone)
+        elif contact.ia_ativa == activate:
+            ja_estava.append(phone)
+        else:
+            if activate:
+                db.reativar_bot(phone, canal=WHATSAPP)
+            else:
+                db.pausar_bot(phone, canal=WHATSAPP)
+            mudou_agora.append(phone)
+    return mudou_agora, ja_estava, nao_encontrado
 
 
 # Persistent admin simulation mode (`#simular` alone / `#end-simular` alone
@@ -109,6 +139,9 @@ Exemplos:
 • *Assumo a Maria* / *Vou atender o João*
 • *Finalizei com a Maria* / *Atendi o 5511...*
 • *Libera o bot para o João* / *Bot pode voltar a falar com Maria*
+• *Ativa o bot 5511999999999, 5511888888888* — funciona com 1 número ou lista
+• *Renomeia o Pedro para Pedro Silva*
+• *Apaga o contato do 5511999999999* (pede confirmação)
 • *Marca a Maria como cliente ativo* / *Confirma venda da Maria*
 • *Como está o disparo <lote>?* / *Quantos faltam no <lote>?*
 
@@ -315,6 +348,52 @@ def _execute_action(
             f"✅ *{label}* marcado(a) como *cliente ativo*.",
         )
 
+    if acao.startswith("rename:"):
+        # `admin-bulk-phone-toggle`: the new name rides along in `acao`
+        # itself — same reasoning as `set_tipo_cliente:` above, `acao` is
+        # the only piece of this call that survives a disambiguation
+        # round-trip through `admin_sessao`.
+        new_name = acao.split(":", 1)[1]
+        contact = db.get_contact_by_phone(target.external_id, canal=target.canal)
+        if not contact:
+            return _reply(
+                router, db, admin_phone, contact_id, f"Contato {label} não encontrado."
+            )
+        db.update_contact_push_name(contact.id, new_name)
+        return _reply(
+            router,
+            db,
+            admin_phone,
+            contact_id,
+            f"✅ *{label}* renomeado para *{new_name}*.",
+        )
+
+    if acao == "delete_contact":
+        # Never deletes here directly — deletion is irreversible
+        # (`ON DELETE CASCADE` on `mensagens`/`media_arquivos`), so this
+        # only asks for confirmation; the actual `db.delete_contact` call
+        # happens in `_try_pending_delete_confirmation` after the admin
+        # replies "sim" (`admin-bulk-phone-toggle`, Part D).
+        contact = db.get_contact_by_phone(target.external_id, canal=target.canal)
+        if not contact:
+            return _reply(
+                router, db, admin_phone, contact_id, f"Contato {label} não encontrado."
+            )
+        db.save_admin_sessao(
+            admin_phone,
+            "confirmar_exclusao",
+            [{"external_id": target.external_id, "canal": target.canal, "label": label}],
+        )
+        return _reply(
+            router,
+            db,
+            admin_phone,
+            contact_id,
+            f"⚠️ Tem certeza que quer apagar *{label}*? Isso remove TODO o histórico de "
+            "mensagens e não pode ser desfeito. Responda *sim* para confirmar ou "
+            "qualquer outra coisa para cancelar.",
+        )
+
     return _reply(router, db, admin_phone, contact_id, "Ação desconhecida.")
 
 
@@ -341,13 +420,97 @@ def _resolve_waiting(
     return None, f"Não encontrei *{query.strip()}* na fila. Envie *fila* para ver a lista."
 
 
+def _try_bulk_phone_toggle(
+    query: str,
+    activate: bool,
+    admin_phone: str,
+    db: Database,
+    router,
+    contact_id: int,
+) -> dict | None:
+    """Intercepts a pause/reactivate query that names phone(s) directly
+    (one or a comma-separated list), applying the idempotent fallback
+    (`admin-bulk-phone-toggle`). Returns `None` when the query has no
+    recognizable phone at all, so the caller falls back to the existing
+    name-based `_resolve_reactivate`/`_resolve_pause` flow unchanged.
+    """
+    phones = extract_phone_list_from_text(query)
+    bulk = phones is not None
+    unrecognized = 0
+    if bulk:
+        total_segments = len([s for s in query.split(",") if s.strip()])
+        unrecognized = total_segments - len(phones)
+        if not phones:
+            return None
+    else:
+        single = extract_phone_from_text(query)
+        if not single:
+            return None
+        phones = [single]
+
+    changed, already, missing = _toggle_bot_for_phones(phones, activate, db)
+
+    if not bulk:
+        # Exactly one phone, no comma in the query — preserve the
+        # existing single-target reply wording verbatim (regression:
+        # `test_confirmation_message_suggests_a_command_that_actually_
+        # reactivates` extracts and re-executes this exact suggestion).
+        phone = phones[0]
+        if phone in changed:
+            if activate:
+                text = f"✅ Bot reativado para *{phone}*."
+            else:
+                text = (
+                    f"🔕 Bot pausado para *{phone}*. Envie *reativar {phone}* "
+                    "para retomar."
+                )
+            return _reply(router, db, admin_phone, contact_id, text)
+        if phone in already:
+            text = (
+                f"*{phone}* já está ativo."
+                if activate
+                else f"*{phone}* já está com o bot pausado."
+            )
+            return _reply(router, db, admin_phone, contact_id, text)
+        # Não encontrado: em vez de só informar, oferece cadastrar
+        # (admin-bulk-phone-toggle, Parte B) — ver
+        # `_try_pending_contact_creation`.
+        db.save_admin_sessao(
+            admin_phone,
+            "confirmar_criacao",
+            [{"phone": phone, "canal": WHATSAPP, "activate": activate}],
+        )
+        text = (
+            f"Não encontrei *{phone}*. Quer cadastrar como novo contato? "
+            "Envie o nome (ou *não* para cancelar)."
+        )
+        return _reply(router, db, admin_phone, contact_id, text)
+
+    # Two or more phones (or one phone + unrecognized segments): grouped
+    # PT-BR summary. Missing phones here do NOT trigger the creation flow
+    # (would require asking a name per number — out of scope for lists).
+    lines: list[str] = []
+    if changed:
+        emoji = "✅" if activate else "🔕"
+        verb = "ativado" if activate else "pausado"
+        lines.append(f"{emoji} Bot {verb} para: {', '.join(changed)}")
+    if already:
+        state = "ativo" if activate else "pausado"
+        lines.append(f"Já estava {state}: {', '.join(already)}")
+    if missing:
+        lines.append(f"Não encontrado: {', '.join(missing)}")
+    if unrecognized:
+        lines.append(f"Não reconhecido: {unrecognized} número(s) no texto enviado.")
+    text = "\n".join(lines) if lines else "Nenhum número reconhecido."
+    return _reply(router, db, admin_phone, contact_id, text)
+
+
 def _resolve_reactivate(
     query: str, admin_phone: str, db: Database
 ) -> tuple[TargetIdentity | None, str | None]:
-    phone = extract_phone_from_text(query)
-    if phone:
-        return TargetIdentity(external_id=phone, canal=WHATSAPP, label=phone), None
-
+    # Direct phone(s) are intercepted earlier by `_try_bulk_phone_toggle`
+    # (`admin-bulk-phone-toggle`), which is idempotent — this function only
+    # ever sees a query it couldn't resolve to a phone (i.e. name-based).
     rows = [r for r in db.search_contacts_for_admin(query) if not r["ia_ativa"]]
     if len(rows) == 1:
         r = rows[0]
@@ -393,11 +556,11 @@ def _resolve_pause(
     with the `ia_ativa` filter inverted (`admin-bot-pause`): only a contact
     that still has the bot active is offered as a target — a name match
     that turns out to already be paused gets an idempotent "já está
-    pausado" reply instead of silently disappearing as "não encontrado"."""
-    phone = extract_phone_from_text(query)
-    if phone:
-        return TargetIdentity(external_id=phone, canal=WHATSAPP, label=phone), None
+    pausado" reply instead of silently disappearing as "não encontrado".
 
+    Direct phone(s) are intercepted earlier by `_try_bulk_phone_toggle`
+    (`admin-bulk-phone-toggle`), which is idempotent — this function only
+    ever sees a query it couldn't resolve to a phone (i.e. name-based)."""
     all_rows = db.search_contacts_for_admin(query)
     rows = [r for r in all_rows if r["ia_ativa"]]
     if len(rows) == 1:
@@ -542,6 +705,179 @@ def _resolve_set_tipo_cliente(
     return None, f"Não encontrei contato para *{query.strip()}*."
 
 
+def _resolve_rename(
+    query: str, admin_phone: str, db: Database
+) -> tuple[TargetIdentity | None, str | None, str | None]:
+    """Resolve the target (name or phone) and split off the new name, on
+    the literal " para " (`admin-bulk-phone-toggle`, Part C). Same shape
+    as `_resolve_mark_active_client`, with `new_name` surviving a possible
+    disambiguation round-trip encoded in `acao` (same trick as
+    `_resolve_set_tipo_cliente`)."""
+    parts = re.split(r"\bpara\b", query, maxsplit=1, flags=re.I)
+    if len(parts) != 2 or not parts[1].strip():
+        return None, None, "Envie assim: *renomeia <nome ou telefone> para <novo nome>*."
+    target_query = parts[0].strip(" :,-–—")
+    new_name = parts[1].strip(" :,-–—")
+    if not target_query or not new_name:
+        return None, None, "Envie assim: *renomeia <nome ou telefone> para <novo nome>*."
+
+    phone = extract_phone_from_text(target_query)
+    if phone:
+        return TargetIdentity(external_id=phone, canal=WHATSAPP, label=phone), new_name, None
+
+    rows = db.search_contacts_for_admin(target_query)
+    if len(rows) == 1:
+        r = rows[0]
+        return (
+            TargetIdentity(
+                external_id=r["external_id"] or r["phone"],
+                canal=r["canal"],
+                label=r["label"],
+            ),
+            new_name,
+            None,
+        )
+    if len(rows) > 1:
+        candidatos = [
+            {
+                "id": r["id"],
+                "phone": r["phone"],
+                "push_name": r["push_name"],
+                "minutes_waiting": 0,
+                "prioridade": 0,
+                "canal": r["canal"],
+                "external_id": r["external_id"],
+                "handle": r["handle"],
+            }
+            for r in rows[:5]
+        ]
+        db.save_admin_sessao(admin_phone, f"rename:{new_name}", candidatos)
+        lines = ["Encontrei vários contatos. Qual deles?"]
+        for idx, r in enumerate(rows[:5], start=1):
+            name = r["push_name"] or "Sem nome"
+            fila = " (na fila)" if r["in_queue"] else ""
+            canal = channel_label(r["canal"])
+            lines.append(f"*{idx}.* {name} — {r['label']} · {canal}{fila}")
+        lines.append("\nResponda com *1*, *2*... ou o telefone.")
+        return None, None, "\n".join(lines)
+
+    return None, None, f"Não encontrei contato para *{target_query}*."
+
+
+def _resolve_delete_contact(
+    query: str, admin_phone: str, db: Database
+) -> tuple[TargetIdentity | None, str | None]:
+    """Same resolution/disambiguation shape as `_resolve_mark_active_client`
+    (no `ia_ativa` filter — any contact is a valid deletion target). The
+    actual deletion never happens here — `_execute_action`'s
+    `delete_contact` branch always asks for confirmation first
+    (`admin-bulk-phone-toggle`, Part D)."""
+    phone = extract_phone_from_text(query)
+    if phone:
+        return TargetIdentity(external_id=phone, canal=WHATSAPP, label=phone), None
+
+    rows = db.search_contacts_for_admin(query)
+    if len(rows) == 1:
+        r = rows[0]
+        return (
+            TargetIdentity(
+                external_id=r["external_id"] or r["phone"],
+                canal=r["canal"],
+                label=r["label"],
+            ),
+            None,
+        )
+    if len(rows) > 1:
+        candidatos = [
+            {
+                "id": r["id"],
+                "phone": r["phone"],
+                "push_name": r["push_name"],
+                "minutes_waiting": 0,
+                "prioridade": 0,
+                "canal": r["canal"],
+                "external_id": r["external_id"],
+                "handle": r["handle"],
+            }
+            for r in rows[:5]
+        ]
+        db.save_admin_sessao(admin_phone, "delete_contact", candidatos)
+        lines = ["Encontrei vários contatos. Qual deles?"]
+        for idx, r in enumerate(rows[:5], start=1):
+            name = r["push_name"] or "Sem nome"
+            fila = " (na fila)" if r["in_queue"] else ""
+            canal = channel_label(r["canal"])
+            lines.append(f"*{idx}.* {name} — {r['label']} · {canal}{fila}")
+        lines.append("\nResponda com *1*, *2*... ou o telefone.")
+        return None, "\n".join(lines)
+
+    return None, f"Não encontrei contato para *{query.strip()}*."
+
+
+_CANCEL_WORDS = re.compile(r"^(n[aã]o|n|cancelar)$", re.I)
+
+
+def _try_pending_contact_creation(
+    text: str, admin_phone: str, db: Database, router, contact_id: int
+) -> dict | None:
+    """Second step of the contact-creation flow offered when a single
+    phone number isn't found (`admin-bulk-phone-toggle`, Part B). Returns
+    `None` without consuming the session when the pending `acao` isn't
+    this one — lets `handle_admin_message` move on to other checks (e.g.
+    disambiguation)."""
+    pending = db.get_admin_sessao(admin_phone)
+    if not pending:
+        return None
+    acao, candidatos = pending
+    if acao != "confirmar_criacao" or not candidatos:
+        return None
+    db.clear_admin_sessao(admin_phone)
+    alvo = candidatos[0]
+    raw = text.strip()
+    if _CANCEL_WORDS.match(raw):
+        return _reply(router, db, admin_phone, contact_id, "Ok, não criei o contato.")
+    db.create_contact(phone=alvo["phone"], push_name=raw, ia_ativa=alvo["activate"])
+    estado = "ativo" if alvo["activate"] else "pausado"
+    return _reply(
+        router,
+        db,
+        admin_phone,
+        contact_id,
+        f"✅ Contato *{raw}* ({alvo['phone']}) criado, bot já {estado}.",
+    )
+
+
+_CONFIRM_YES = re.compile(r"^(sim|s|confirmar|confirmo|yes)$", re.I)
+
+
+def _try_pending_delete_confirmation(
+    text: str, admin_phone: str, db: Database, router, contact_id: int
+) -> dict | None:
+    """Second step (confirmation) of the contact-deletion command
+    (`admin-bulk-phone-toggle`, Part D). Returns `None` without consuming
+    the session when the pending `acao` isn't this one."""
+    pending = db.get_admin_sessao(admin_phone)
+    if not pending:
+        return None
+    acao, candidatos = pending
+    if acao != "confirmar_exclusao" or not candidatos:
+        return None
+    db.clear_admin_sessao(admin_phone)
+    alvo = candidatos[0]
+    if not _CONFIRM_YES.match(text.strip()):
+        return _reply(router, db, admin_phone, contact_id, "Cancelado. Nada foi apagado.")
+    ok = db.delete_contact(alvo["external_id"], canal=alvo["canal"])
+    if ok:
+        return _reply(
+            router,
+            db,
+            admin_phone,
+            contact_id,
+            f"🗑️ Contato *{alvo['label']}* apagado, junto com todo o histórico.",
+        )
+    return _reply(router, db, admin_phone, contact_id, "Não encontrei mais esse contato.")
+
+
 def handle_admin_message(
     phone: str,
     text: str,
@@ -551,6 +887,18 @@ def handle_admin_message(
 ) -> dict:
     admin_phone = normalize_phone(phone)
     db.save_message(contact_id, direction="in", text=text)
+
+    pending_delete = _try_pending_delete_confirmation(
+        text, admin_phone, db, router, contact_id
+    )
+    if pending_delete:
+        return pending_delete
+
+    pending_create = _try_pending_contact_creation(
+        text, admin_phone, db, router, contact_id
+    )
+    if pending_create:
+        return pending_create
 
     pending = _try_pending_disambiguation(text, admin_phone, db, router, contact_id)
     if pending:
@@ -617,6 +965,11 @@ def handle_admin_message(
         )
 
     if intent.action == "reactivate" and intent.query:
+        bulk = _try_bulk_phone_toggle(
+            intent.query, True, admin_phone, db, router, contact_id
+        )
+        if bulk:
+            return bulk
         target, err = _resolve_reactivate(intent.query, admin_phone, db)
         if err:
             return _reply(router, db, admin_phone, contact_id, err)
@@ -625,6 +978,11 @@ def handle_admin_message(
         )
 
     if intent.action == "pause" and intent.query:
+        bulk = _try_bulk_phone_toggle(
+            intent.query, False, admin_phone, db, router, contact_id
+        )
+        if bulk:
+            return bulk
         target, err = _resolve_pause(intent.query, admin_phone, db)
         if err:
             return _reply(router, db, admin_phone, contact_id, err)
@@ -653,6 +1011,22 @@ def handle_admin_message(
             db,
             router,
             contact_id,
+        )
+
+    if intent.action == "rename" and intent.query:
+        target, new_name, err = _resolve_rename(intent.query, admin_phone, db)
+        if err:
+            return _reply(router, db, admin_phone, contact_id, err)
+        return _execute_action(
+            f"rename:{new_name}", target, admin_phone, db, router, contact_id
+        )
+
+    if intent.action == "delete_contact" and intent.query:
+        target, err = _resolve_delete_contact(intent.query, admin_phone, db)
+        if err:
+            return _reply(router, db, admin_phone, contact_id, err)
+        return _execute_action(
+            "delete_contact", target, admin_phone, db, router, contact_id
         )
 
     return _reply(

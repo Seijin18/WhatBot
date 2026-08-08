@@ -18,6 +18,8 @@ IntentAction = Literal[
     "summary",
     "help",
     "complete_all",
+    "rename",
+    "delete_contact",
     "unknown",
 ]
 
@@ -43,8 +45,15 @@ _COMPLETE = re.compile(
     r"\b(atender|atendi|finalizei|finalizado|conclu[ií]|resolvido|pronto|encerr(?:ar|ei)|remover\s+da\s+fila)\b",
     re.I,
 )
+# `admin-bulk-phone-toggle`: "ativar" is accepted as a synonym of
+# "reativar", but only when it accompanies "bot" in the phrase — a bare
+# "ativa(r)" alone could false-positive on unrelated text. The `\b` right
+# before "ativa" also guarantees this never matches inside "desativar"
+# (no word boundary between the "s" and "ativa" there), so `_PAUSE`'s
+# trigger keeps working unmodified.
 _REACTIVATE = re.compile(
-    r"\b(reativar|libera(?:r)?\s+(?:o\s+)?bot|volta(?:r)?\s+(?:o\s+)?bot|bot\s+(?:pode|volta)\b|pode\s+voltar\s+a\s+falar)\b",
+    r"\b(reativar|ativa(?:r)?\s+(?:o\s+)?bot|libera(?:r)?\s+(?:o\s+)?bot|"
+    r"volta(?:r)?\s+(?:o\s+)?bot|bot\s+(?:pode|volta)\b|pode\s+voltar\s+a\s+falar)\b",
     re.I,
 )
 
@@ -138,6 +147,31 @@ _SET_TIPO_CLIENTE_PREFIX = re.compile(
 )
 
 
+# `admin-bulk-phone-toggle`: rename a contact's `push_name`. The target and
+# the new name are separated later in `whatbot/admin.py::_resolve_rename`
+# (literal " para " split) — this trigger only needs to detect the intent
+# and strip the leading verb, mirroring the "swallow filler article first"
+# shape used by `_MARK_ACTIVE_CLIENT_PREFIX` above.
+_RENAME_PREFIX = re.compile(
+    r"\brenomeia(?:r)?\s+(?:o\s+|a\s+)?"
+    r"|\bmuda(?:r)?\s+o\s+nome\s+(?:do\s+|da\s+|de\s+)?"
+    r"|\btroca(?:r)?\s+o\s+nome\s+(?:do\s+|da\s+|de\s+)?"
+    r"|\b(?:renomeia(?:r)?|muda(?:r)?\s+o\s+nome|troca(?:r)?\s+o\s+nome)\b",
+    re.I,
+)
+
+# `admin-bulk-phone-toggle`: delete a contact permanently (irreversible —
+# `whatbot/admin.py::_execute_action`'s `delete_contact` branch always asks
+# for confirmation before calling `Database.delete_contact`). Requires the
+# word "contato" so it never collides with `_COMPLETE`'s "remover da fila"
+# (which requires the literal "da fila").
+_DELETE_CONTACT = re.compile(
+    r"\b(?:apaga(?:r)?|exclui(?:r)?|deleta(?:r)?|remove(?:r)?)\s+(?:o\s+)?contato\s+(?:do\s+|da\s+|de\s+)?"
+    r"|\b(?:apaga(?:r)?|exclui(?:r)?|deleta(?:r)?|remove(?:r)?)\s+(?:o\s+)?contato\b",
+    re.I,
+)
+
+
 def _strip_intent_prefix(text: str, pattern: re.Pattern[str]) -> str:
     match = pattern.search(text)
     if not match:
@@ -176,6 +210,14 @@ def parse_admin_intent(text: str) -> AdminIntent:
     if _PAUSE.search(lower):
         query = _strip_intent_prefix(raw, _PAUSE)
         return AdminIntent("pause", query or raw)
+
+    if _RENAME_PREFIX.search(lower):
+        query = _strip_intent_prefix(raw, _RENAME_PREFIX)
+        return AdminIntent("rename", query or raw)
+
+    if _DELETE_CONTACT.search(lower):
+        query = _strip_intent_prefix(raw, _DELETE_CONTACT)
+        return AdminIntent("delete_contact", query or raw)
 
     if _MARK_ACTIVE_CLIENT_SUFFIX.search(lower):
         query = _strip_intent_suffix(raw, _MARK_ACTIVE_CLIENT_SUFFIX)

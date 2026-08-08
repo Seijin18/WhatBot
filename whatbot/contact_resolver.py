@@ -34,6 +34,36 @@ def extract_phone_from_text(text: str) -> str | None:
     return normalize_phone(match.group(0)) if match else None
 
 
+def extract_phone_list_from_text(text: str) -> list[str] | None:
+    """Extract multiple comma-separated phone numbers from free admin text.
+
+    Returns `None` when `text` has no comma — caller should fall back to
+    `extract_phone_from_text` (single number) or name resolution.
+
+    When there IS a comma, splits on it and runs `extract_phone_from_text`
+    per segment (reused rather than `config._parse_phone_list`, since it
+    already tolerates textual noise around the number). Segments that
+    don't yield a recognizable phone are skipped — best-effort: never
+    raises, never discards the whole list because of one bad segment.
+    Result is deduped, order preserved. May return an empty list if a
+    comma was present but nothing was recognized — callers must treat
+    that as "no phone found", not as an error.
+    """
+    if "," not in text:
+        return None
+    phones: list[str] = []
+    seen: set[str] = set()
+    for segment in text.split(","):
+        segment = segment.strip()
+        if not segment:
+            continue
+        phone = extract_phone_from_text(segment)
+        if phone and phone not in seen:
+            phones.append(phone)
+            seen.add(phone)
+    return phones
+
+
 def _name_tokens(query: str) -> list[str]:
     folded = _fold(query)
     stop = {"o", "a", "os", "as", "de", "da", "do", "para", "pro", "pra", "cliente", "contato"}

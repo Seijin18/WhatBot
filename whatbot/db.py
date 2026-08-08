@@ -971,6 +971,23 @@ class Database:
                 )
                 return cur.fetchone() is not None
 
+    def delete_contact(self, phone: str, *, canal: str | None = None) -> bool:
+        """Permanently delete a contact (`admin-bulk-phone-toggle`, Part D)
+        — via `ON DELETE CASCADE` on `mensagens`/`media_arquivos`, also
+        deletes its entire message history and media. Irreversible:
+        callers MUST confirm with the admin before invoking (see the
+        confirmation flow in
+        `whatbot/admin.py::_try_pending_delete_confirmation`)."""
+        canal = normalize_channel(canal)
+        self.init_pool()
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM contatos WHERE canal = %s AND external_id = %s RETURNING id",
+                    (canal, phone),
+                )
+                return cur.fetchone() is not None
+
     def pausar_bot(self, phone: str, *, canal: str | None = None) -> bool:
         """Manually pause the bot for a contact outside the handover queue
         (`admin-bot-pause`). Mirrors `reativar_bot`'s `(canal, external_id)`
