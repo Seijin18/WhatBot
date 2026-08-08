@@ -134,6 +134,17 @@ encontrado".
 - **THEN** nenhum contato é criado
 - **AND** o bot confirma que nada foi feito
 
+#### Scenario: Admin envia outro comando real em vez de responder o prompt
+
+- **GIVEN** o bot perguntou se deve criar o contato e está aguardando o
+  nome
+- **WHEN** o admin envia, em vez de um nome, um comando reconhecível
+  (ex. "apaga o contato do Pedro")
+- **THEN** o prompt pendente é abandonado (sem criar contato algum com o
+  texto do comando como nome)
+- **AND** o comando enviado é processado normalmente, como se não houvesse
+  nenhum prompt pendente
+
 ### Requirement: Admin renomeia um contato
 
 Um admin DEVE poder alterar o nome (`push_name`) de um contato existente

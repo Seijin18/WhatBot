@@ -824,18 +824,41 @@ def _try_pending_contact_creation(
     phone number isn't found (`admin-bulk-phone-toggle`, Part B). Returns
     `None` without consuming the session when the pending `acao` isn't
     this one — lets `handle_admin_message` move on to other checks (e.g.
-    disambiguation)."""
+    disambiguation).
+
+    If a `confirmar_criacao` session IS pending but `text` looks like a
+    real admin command (`parse_admin_intent(text).action != "unknown"`)
+    rather than an answer to the "quer cadastrar?" prompt, the pending
+    session is cleared (no point insisting later) and `None` is returned
+    so `handle_admin_message` processes `text` as that command instead —
+    unlike `_try_pending_disambiguation`, which leaves its session intact
+    on an unrecognized reply, since there the ambiguity is about *which*
+    candidate, not whether the reply is a command at all."""
     pending = db.get_admin_sessao(admin_phone)
     if not pending:
         return None
     acao, candidatos = pending
     if acao != "confirmar_criacao" or not candidatos:
         return None
-    db.clear_admin_sessao(admin_phone)
     alvo = candidatos[0]
     raw = text.strip()
     if _CANCEL_WORDS.match(raw):
+        db.clear_admin_sessao(admin_phone)
         return _reply(router, db, admin_phone, contact_id, "Ok, não criei o contato.")
+    if not raw:
+        db.clear_admin_sessao(admin_phone)
+        return _reply(router, db, admin_phone, contact_id, "Ok, não criei o contato.")
+    if parse_admin_intent(raw).action != "unknown":
+        # The admin sent something that looks like a real command instead
+        # of answering the "quer cadastrar?" prompt (e.g. a follow-up
+        # command sent while the prompt was still pending). Abandon the
+        # pending creation — insisting on the old prompt after the admin
+        # has moved on would be more confusing than useful — and let
+        # `handle_admin_message` process `text` as a normal command via
+        # `parse_admin_intent` right after this call returns `None`.
+        db.clear_admin_sessao(admin_phone)
+        return None
+    db.clear_admin_sessao(admin_phone)
     db.create_contact(phone=alvo["phone"], push_name=raw, ia_ativa=alvo["activate"])
     estado = "ativo" if alvo["activate"] else "pausado"
     return _reply(

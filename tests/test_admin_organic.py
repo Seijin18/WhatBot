@@ -985,6 +985,43 @@ class TestContactCreationFlow(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertIsNone(db.get_contact_by_phone("5511888888888"))
 
+    def test_a_real_command_sent_while_prompt_is_pending_runs_instead_of_being_taken_as_name(
+        self,
+    ):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511777777777", push_name="Pedro")
+
+        handle_admin_message(
+            "5511900000001", "desativa o bot 5511888888888", db, router, contact_id=1
+        )
+        result = handle_admin_message(
+            "5511900000001", "apaga o contato do Pedro", db, router, contact_id=1
+        )
+
+        # The real command ("apaga o contato do Pedro") is processed
+        # normally (delete_contact asks for confirmation), not swallowed
+        # as the pending contact's name.
+        self.assertTrue(result["ok"])
+        self.assertIn("Tem certeza", result["reply"])
+        self.assertIsNotNone(db.get_contact_by_phone("5511777777777"))
+        # No garbage contact was created with the command text as name.
+        self.assertIsNone(db.get_contact_by_phone("5511888888888"))
+
+    def test_answering_with_only_whitespace_cancels_without_creating(self):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+
+        handle_admin_message(
+            "5511900000001", "ativa o bot 5511888888888", db, router, contact_id=1
+        )
+        result = handle_admin_message(
+            "5511900000001", "   ", db, router, contact_id=1
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertIsNone(db.get_contact_by_phone("5511888888888"))
+
 
 class TestRenameCommand(unittest.TestCase):
     """`admin-bulk-phone-toggle`, Parte C."""

@@ -30,9 +30,13 @@
       Requirement "Oferecer criar contato ao não encontrar telefone único"
 - [x] 2.2 `_try_pending_contact_creation` em `whatbot/admin.py`, checado em
       `handle_admin_message` antes de `_try_pending_disambiguation`:
-      resposta de cancelamento não cria nada; qualquer outro texto vira o
-      `push_name` do `create_contact`, já com o `ia_ativa` do pedido
-      original
+      resposta de cancelamento (ou vazia/só espaços) não cria nada; texto
+      que `parse_admin_intent` reconhece como comando também não é tomado
+      como nome — a sessão pendente é abandonada e o comando segue seu
+      próprio fluxo normal; qualquer outro texto vira o `push_name` do
+      `create_contact`, já com o `ia_ativa` do pedido original (correção
+      pós-review: bug em que um comando real enviado enquanto o prompt
+      estava pendente virava `push_name` de um contato-lixo)
 - [x] 2.3 Lista (2+ telefones) com número não encontrado NÃO dispara esse
       fluxo — só aparece na seção "Não encontrado" do resumo
 
