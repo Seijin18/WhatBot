@@ -209,6 +209,17 @@ confirmação explícita numa segunda mensagem, dado que é irreversível.
 - **THEN** o contato NÃO é apagado
 - **AND** o bot confirma que a exclusão foi cancelada
 
+#### Scenario: Admin envia outro comando real em vez de responder o prompt
+
+- **GIVEN** o bot pediu confirmação de exclusão para um contato e está
+  aguardando "sim"/"não"
+- **WHEN** o admin envia, em vez de uma confirmação, um comando
+  reconhecível não relacionado (ex. "renomeia Maria para Mari")
+- **THEN** a exclusão pendente é abandonada (o contato original NÃO é
+  apagado)
+- **AND** o comando enviado é processado normalmente, como se não houvesse
+  nenhuma confirmação pendente
+
 #### Scenario: Nome ambíguo desambigua antes de pedir confirmação
 
 - **GIVEN** mais de um contato correspondendo ao nome informado no comando

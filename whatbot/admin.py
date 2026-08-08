@@ -878,16 +878,31 @@ def _try_pending_delete_confirmation(
 ) -> dict | None:
     """Second step (confirmation) of the contact-deletion command
     (`admin-bulk-phone-toggle`, Part D). Returns `None` without consuming
-    the session when the pending `acao` isn't this one."""
+    the session when the pending `acao` isn't this one.
+
+    Same design pattern as `_try_pending_contact_creation`: an affirmative
+    reply confirms and deletes, but anything else is only treated as an
+    explicit refusal if it doesn't look like a real admin command first —
+    otherwise the pending session is dropped (no deletion) and `None` is
+    returned so `handle_admin_message` processes `text` as that command."""
     pending = db.get_admin_sessao(admin_phone)
     if not pending:
         return None
     acao, candidatos = pending
     if acao != "confirmar_exclusao" or not candidatos:
         return None
-    db.clear_admin_sessao(admin_phone)
     alvo = candidatos[0]
-    if not _CONFIRM_YES.match(text.strip()):
+    if _CONFIRM_YES.match(text.strip()):
+        db.clear_admin_sessao(admin_phone)
+    elif parse_admin_intent(text.strip()).action != "unknown":
+        # Admin sent a real command instead of answering the delete
+        # confirmation prompt — abandon the pending deletion and let
+        # `handle_admin_message` process `text` normally right after this
+        # call returns `None`.
+        db.clear_admin_sessao(admin_phone)
+        return None
+    else:
+        db.clear_admin_sessao(admin_phone)
         return _reply(router, db, admin_phone, contact_id, "Cancelado. Nada foi apagado.")
     ok = db.delete_contact(alvo["external_id"], canal=alvo["canal"])
     if ok:

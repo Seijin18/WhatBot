@@ -1177,10 +1177,37 @@ class TestDeleteContactCommand(unittest.TestCase):
             "5511900000001", "apaga o contato do Pedro", db, router, contact_id=1
         )
         result = handle_admin_message(
-            "5511900000001", "opa não", db, router, contact_id=1
+            "5511900000001", "não quero", db, router, contact_id=1
         )
 
         self.assertTrue(result["ok"])
+        self.assertIn("Cancelado", result["reply"])
+        self.assertIsNotNone(db.get_contact_by_phone("5511888888888"))
+
+    def test_a_real_command_sent_while_confirmation_is_pending_runs_instead_of_being_taken_as_refusal(
+        self,
+    ):
+        db = FakeDatabase()
+        router = FakeClient(WHATSAPP)
+        db.create_contact(phone="5511888888888", push_name="Pedro")
+        db.create_contact(phone="5511777777777", push_name="Maria")
+
+        handle_admin_message(
+            "5511900000001", "apaga o contato do Pedro", db, router, contact_id=1
+        )
+        result = handle_admin_message(
+            "5511900000001", "renomeia Maria para Mari", db, router, contact_id=1
+        )
+
+        # The real command ("renomeia Maria para Mari") is processed
+        # normally (rename), not swallowed as a refusal of the pending
+        # delete confirmation.
+        self.assertTrue(result["ok"])
+        self.assertIn("Mari", result["reply"])
+        self.assertEqual(
+            db.get_contact_by_phone("5511777777777").push_name, "Mari"
+        )
+        # Pedro's deletion was abandoned, not carried out.
         self.assertIsNotNone(db.get_contact_by_phone("5511888888888"))
 
     def test_disambiguation_then_confirmation_deletes_only_the_chosen_one(self):
